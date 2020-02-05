@@ -2,7 +2,7 @@
 
 This repo contains the frontend to FastBrowser.  The backend is located [here](https://github.com/FastBrowser/chromium).
 
-A hosted version is available (here)[https://fastbrowser.omattos.com].
+A hosted version is available [here](https://fastbrowser.omattos.com).
 
 ## Project Goals
 

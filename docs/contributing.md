@@ -2,6 +2,13 @@
 
 Our goal is to save millions of hours of human time by loading webpages faster.  You can help!
 
+## Spreading the word.
+
+Get news of Brisk Browser out there to friends and family - particularly to those who you think might be able to contribute!
+
+## Donations
+
+If you can contribute financially, we will use it to add to the reward fund to encourage other people to help us achieve our goal of saving millions of human hours quicer.  Contact Project maintainer @Hello1024.
 
 ## Writing Code
 
@@ -18,10 +25,3 @@ The frontend today is a single html file (and we want to keep it small and light
 
 The [Backend](https://github.com/BriskBrowser/chromium) is based on Chromium, and it does everything necessary to be able to give the frontend the information it needs to show an interactive page.   Keep patches here as uninvasive as possible - we want to keep our fork uptodate, so nearly all of our code is in [just one file](https://github.com/BriskBrowser/chromium/blob/22ccfd0dec348ce615a1d0e27aa147d811bdc89c/third_party/blink/renderer/core/inspector/inspector_page_stream_agent.cc).
 
-## Spreading the word.
-
-Get news of Brisk Browser out there to friends and family - particularly to those who you think might be able to contribute!
-
-## Donations
-
-If you can contribute financially, we will use it to add to the reward fund to encourage other people to help us achieve our goal of saving millions of human hours quicer.  Contact Project maintainer @Hello1024.

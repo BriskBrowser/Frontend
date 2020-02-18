@@ -1,4 +1,4 @@
-# FastBrowser
+# BriskBrowser
 
 This repo contains the frontend to BriskBrowser.  The backend is located [here](https://github.com/BriskBrowser/chromium).
 

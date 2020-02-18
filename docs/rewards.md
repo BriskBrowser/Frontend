@@ -1,6 +1,6 @@
 ## Rewards
 
-The Fast Browser project runs a hosted version which is supported by Google Ads and donations.  Project contributors who submit a series of patches which close a bug can receive a share of project revenue, minus Digital Ocean hosting costs, for 6 months after their fix is submitted.
+The Brisk Browser project runs a hosted version which is supported by Google Ads, referral links and donations.  Project contributors who submit a series of patches which close a bug can receive a share of project revenue, minus Digital Ocean hosting costs, for 6 months after their fix is submitted.
 
 Today these amounts are negligable, but are designed to reward contributors if the project sees success.
 
@@ -11,6 +11,6 @@ Reward percentages are set by @Hello1024 based on the importance to the project 
 
 ### Mechanics of the reward
 
-Reward recipients will be shown proof of revenue and server costs, and will receive their reward percentage share of those costs.  In the unlikley event more than 100% of rewards are claimed for a given day, rewards will be linearly scaled down.   The reward period begins when a bug is closed for 7 consecutive days, and ends 180 days later.  If a bug has many contributors, @Hello1024 may decide to split the reward based on *code* contributions.
+Reward recipients will be shown proof of revenue and server costs, and will receive their reward percentage share of those costs.  In the unlikley event more than 100% of rewards are claimed for a given day, rewards will be linearly scaled down.   The reward begins when a bug is closed for 7 consecutive days, and ends 180 days later.  If a bug has many contributors, @Hello1024 may decide to split the reward based on *code* contributions.
 
 The recipient is responsible for making sure both the project and themselves meet all necessary laws for payment of the reward, and paying any taxes or fees relating to the reward.  The recipient can also elect to donate the reward to another person or charity of their choice.

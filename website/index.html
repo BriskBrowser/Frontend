@@ -1,52 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>The speediest browser!</title>
+<title>Brisk Browser</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
 
 body {
-  background-color: #252;
+  background-color: #6eb0ff;
   padding-top: 30%;
+  font-family: sans-serif;
 }
-body > div {
-    margin: 30px 30px;
-    box-shadow: 5px 5px 34px 5px #ffa;
-    background: radial-gradient(circle, rgba(34,193,195,1) 0%, rgba(253,187,45,1) 100%);
-    border: 1px solid #888;
-    border-radius: 25px;
-    padding: 20px;
-    font-family: sans-serif;
-    position: relative;
+.sidebyside {
+  display: flex;
+}
+h1 {
+    font-family: cursive;  
 }
 
-body > div:before {
-    background-image: url('images/logo.svg');
+small {
+    display: block;
+    padding-top: 50px;
+}
+
+#logo {
+    width: 50%;
+    background: url("images/logo.png");
     background-size: contain;
-    width: 25%;
-    height: 25%;
-    content:"";
-    position: absolute;
-    top: -8%;
-    left: -8%;
+    background-position: center;
     background-repeat: no-repeat;
 }
 
 </style>
 </head>
 <body>
-	<div>
-		<h1>Fast Browser</h1>
-		<p>TODO:  Put a homepage for the browser here, and maybe pick some actual decent styles.</p>
+<div class=sidebyside>
+    <div id='logo'></div>
+	
+    <div>
+    	<h1>Brisk Browser</h1>
+    	<p>Brisk Browser gets you round the web faster.</p>
+        <p>Click a link below to get started:</p>
 
-		<p>Check out:
-			<ul>
-				<li><a href="https://wikipedia.org">Wikipedia</a></li>
-				<li><a href="https://google.com">Google</a></li>
-				<li><a href="https://bbc.co.uk">BBC</a></li>
-			</ul>
-		</p>
-	</div>
+    	<p>
+    		<ul>
+    			<li><a href="https://wikipedia.org">Wikipedia</a></li>
+    			<li><a href="https://google.com">Google</a></li>
+    			<li><a href="https://bbc.co.uk">BBC</a></li>
+                <li><a href="https://github.com/BriskBrowser/Frontend">Learn more about brisk browser</a></li>
+    		</ul>
+    	</p>
+    </div>
+</div>
+<small>Brisk Browser currently offers <b>no privacy protections</b> and anyone can see what you are browsing.  Those are coming soon.</small>
 </body>
 </html>
 

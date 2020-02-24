@@ -72,6 +72,7 @@
         this.nextid=0;
         this.callbacks = [];
         this.eventListeners = [];
+        this.childSockets = [];
         this.addEventListener('message', (evt) => {
           var d = JSON.parse(evt.data);
           if (this.callbacks[d.id]) {
@@ -82,23 +83,41 @@
             delete this.callbacks[d.id];
           } else
           if (this.eventListeners[d.method])
-            this.eventListeners[d.method].forEach(x => x(d.params))
-          else console.log("unknown msg",d);
+            this.eventListeners[d.method](d.params)
+          this.childSockets.forEach(x=>x.handleMessage(d));
         });
       }
-      req = (method, params) => {
+      req = (sessionId, method, params) => {
         return new Promise((resolve, reject) => {
           this.send(JSON.stringify({
             id: this.nextid,
             method,
             params,
-            sessionId: this.sessionId,
+            sessionId,
           }));
           this.callbacks[this.nextid] = {resolve, reject}
           this.nextid++;
         });
       }
-      setSessionId = (s) => {this.sessionId = s;}
+    }
+
+    class devToolsWebsocketWrapper {
+      constructor (wrappedSocket, sessionId) {
+        this.wrappedSocket = wrappedSocket;
+        this.sessionId = sessionId;
+        this.eventListeners = [];
+        this.wrappedSocket.childSockets.push(this);
+      }
+      req = (method, params) => {
+        return this.wrappedSocket.req(this.sessionId, method, params);
+      }
+      handleMessage = (msg) => {
+        if (this.eventListeners[msg.method])
+            this.eventListeners[msg.method](msg.params);
+      }
+      destroy = () => {
+        this.wrappedSocket.childSockets = this.wrappedSocket.childSockets.filter(x=> x != this);
+      }
     }
 
     // Implements a stochastic client-side loadbalancer
@@ -136,7 +155,7 @@
         socketPool.forEach(s => {
           s.ws.onopen = async () => {
             try {
-              s.load = socketPool.length==1?1:(await s.ws.req('Load.GetLoad', {}));
+              s.load = socketPool.length==1?1:(await s.ws.req(undefined, 'Load.GetLoad', {}));
             } catch {
               s.load = 1;
             };
@@ -161,28 +180,24 @@
 
 
     class Session {
-      constructor(ws, sessionId, domElement) {
+      constructor(ws, domElement) {
         this.ws = ws;
-        this.sessionId = sessionId;
         this.domElement = domElement;
         this.sessionState = {preventscroll: 0, nextLayerUpdates: []};
 
         this.layerDB = [];
 
-        ws.eventListeners['PageStream.streamLayerInfo'] = (ws.eventListeners['PageStream.streamLayerInfo'] || []);
-        ws.eventListeners['PageStream.streamLayerInfo'].push( msg => {
+        ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
           this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
-        });
+        };
 
-        ws.eventListeners['PageStream.streamPropTrees'] = (ws.eventListeners['PageStream.streamPropTrees'] || []);
-        ws.eventListeners['PageStream.streamPropTrees'].push( params => {
+        ws.eventListeners['PageStream.streamPropTrees'] =  params => {
           this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
-        });
+        };
         
-        ws.eventListeners['PageStream.frameDone'] = (ws.eventListeners['PageStream.frameDone'] || []);
-        ws.eventListeners['PageStream.frameDone'].push( () => {
+        ws.eventListeners['PageStream.frameDone'] = () => {
           this.updateScreen();
-        });
+        };
 
         ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
           this.domElement.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
@@ -259,7 +274,7 @@
         this.sessionState.preventscroll++;
         this.sessionState.preventscrollElem = t.scroll.element_id.id_;
         //if (t.dom.scrollTop == t.scroll_offset[1] && t.dom.scrollLeft==t.scroll_offset[0]) return;
-        socket.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
+        this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
       }
       createDOMLayerNode(l) {
 
@@ -313,7 +328,7 @@
       }
 
       targetClick(evt) {
-        socket.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
+        this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
         evt.stopPropagation();
       }
 
@@ -325,7 +340,7 @@
         t.dom.style.top = t.containingQuads[0][1]+l.offsetToTransformParent[1]+'px';
         t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
         t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
-        t.dom.onclick = this.targetClick;
+        t.dom.onclick = this.targetClick.bind(this);
         t.dom.metadata = t;
         t.dom.className = 'link';
       }
@@ -455,7 +470,7 @@
         });
       }
       resize() {
-        socket.req('Emulation.setDeviceMetricsOverride', {
+        this.ws.req('Emulation.setDeviceMetricsOverride', {
           height: this.domElement.offsetHeight,
           width: this.domElement.offsetWidth,
           deviceScaleFactor: window.devicePixelRatio,
@@ -464,7 +479,7 @@
       }
 
       touch(n, e){
-        socket.req('Input.dispatchTouchEvent', {
+        this.ws.req('Input.dispatchTouchEvent', {
           type: n,
           touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
         });
@@ -483,30 +498,41 @@
       // response from a request.  The intention is a server can fire
       // off all these requests to the browser before the client even
       // connects to speed up initial loading.
-      socket.req('Target.setDiscoverTargets', {discover: true});
-      socket.eventListeners['Target.targetCreated'] = [ msg => {
+      socket.req(undefined, 'Target.setDiscoverTargets', {discover: true});
+      socket.eventListeners['Target.targetCreated'] = msg => {
         if (msg.targetInfo.type=='page') {
-          socket.req('Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
+          socket.req(undefined, 'Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
         }
-      }];
-      socket.eventListeners['Target.attachedToTarget'] = [ msg => {
+      };
+
+      function addSession(ws, sessionId, existingSession) {
+        
+        var newElem = document.createElement('bb-session');
+        document.getElementById('recreation').appendChild(newElem);
+
+        var sess = new Session(ws, newElem, existingSession);
+        sessions.push(sess);
+
+        sess.onNewSession = addSession;
+      }
+
+      socket.eventListeners['Target.attachedToTarget'] = msg => {
         // TODO:  Handle case of multiple targets/sessions/windows etc.
         console.log("new target", msg);
 
-        var newElem = document.createElement('bb-session');
-        document.getElementById('recreation').appendChild(newElem);
-        sessions.push(new Session(socket, msg.sessionId, newElem));
+        var ws = new devToolsWebsocketWrapper(socket, msg.sessionId);
+        
+        addSession(ws,  msg.sessionId, null);
 
-        socket.setSessionId(msg.sessionId);
-        socket.req('Page.navigate', {url: currentURL()});
-        socket.req('Page.enable');
-        socket.req('PageStream.enable');
+        ws.req('Page.navigate', {url: currentURL()});
+        ws.req('Page.enable');
+        ws.req('PageStream.enable');
 
         resize();     
-      }]
+      };
 
 
-      socket.eventListeners['Target.targetInfoChanged'] = [ params => {
+      socket.eventListeners['Target.targetInfoChanged'] = params => {
         // Update URL and page title
         if (params.targetInfo.url.startsWith('http'))
           if (currentURL() != params.targetInfo.url)
@@ -514,7 +540,7 @@
         // This doesn't work properly because the browser doesn't emit an event if
         // the title changes without a navigation event happening.
         document.title = params.targetInfo.title;
-      }];
+      };
 
       var resize = () => {
         sessions.forEach(x=> x.resize());

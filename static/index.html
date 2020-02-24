@@ -4,16 +4,17 @@
   <meta name="viewport" content="width=device-width, user-scalable=no">
   <style>
 
-    #recreation {
+    bb-session {
       width: 300px;
       height: 300px;
       position: relative;
+      display: block;
     }
 
     .link {
       background-color: rgba(255,0,0,0.1);
       z-index: 9999;
-      pointer-events: none;
+      cursor: pointer;
       position: absolute;
       border: 0.5px solid rgba(255,0,0,0.4);
       border-radius: 3px;
@@ -158,270 +159,325 @@
       return document.location.href;
     }
 
-    function decodeLayerInfo(l) {
-      var decoded = l.split('\n').map(x => x.split(':')).filter(x=>x.length>1).reduce((m, i) => (m[i[0].trim()] = i[1].trim(), m), {});
 
-      res = {layerId: decoded.layer_id};
-      res.drawsContent = decoded.Bounds != '0x0';
+    class Session {
+      constructor(ws, sessionId, domElement) {
+        this.ws = ws;
+        this.sessionId = sessionId;
+        this.domElement = domElement;
+        this.sessionState = {preventscroll: 0, nextLayerUpdates: []};
 
-      res.name = decoded.name;
-      res.bounds = decoded.Bounds.split('x').map(x => parseInt(x));
-      res.offsetToTransformParent = decoded.OffsetToTransformParent.split(' ').map(x => parseFloat(x.replace(/[^\d.-]/g, '')));
-      res.clip_tree_index = parseInt(decoded.clip_tree_index);
-      res.effect_tree_index = parseInt(decoded.effect_tree_index);
-      res.scroll_tree_index = parseInt(decoded.scroll_tree_index);
-      res.transform_tree_index = parseInt(decoded.transform_tree_index);
-      return res
-    }
+        this.layerDB = [];
 
-    function createDOMTransformNode(t, zIndex, adopt) {
-      if (t.parent_id) {
-        if (!t.dom && adopt)
-          // See if there is an element we might adopt
-          if (adopt.adoptable) {
-            t.dom = adopt
-          }
-        createDOMTransformNode(t.parent_id, zIndex, t.dom && t.dom.parentNode);
+        ws.eventListeners['PageStream.streamLayerInfo'] = (ws.eventListeners['PageStream.streamLayerInfo'] || []);
+        ws.eventListeners['PageStream.streamLayerInfo'].push( msg => {
+          this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
+        });
 
-        if (!t.dom) {
-          t.dom = document.createElement('div');
-          t.parent_id.dom.appendChild(t.dom);
-        }
-        t.dom.adoptable = false;
+        ws.eventListeners['PageStream.streamPropTrees'] = (ws.eventListeners['PageStream.streamPropTrees'] || []);
+        ws.eventListeners['PageStream.streamPropTrees'].push( params => {
+          this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
+        });
         
-        if (t.dom.parentNode != t.parent_id.dom) {
-          t.parent_id.dom.appendChild(t.dom);
-        }
-        t.dom.className = 't';
-        t.dom.setAttribute('t'+t.id, '');
-        alldata.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
-        alldata.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
-        t.dom.style.zIndex = t.dom.style.zIndex?Math.max(zIndex, t.dom.style.zIndex):zIndex;
+        ws.eventListeners['PageStream.frameDone'] = (ws.eventListeners['PageStream.frameDone'] || []);
+        ws.eventListeners['PageStream.frameDone'].push( () => {
+          this.updateScreen();
+        });
 
-        if (t.clip) {
-          t.dom.style.width = t.clip.clip[2] + 'px';
-          t.dom.style.height = t.clip.clip[3] + 'px';
-          t.dom.style.top = t.clip.clip[1] + 'px';
-          t.dom.style.left = t.clip.clip[0] + 'px';
-          if (t.clip.clip[0] || t.clip.clip[1])
-            t.dom.style.transform = `matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, ${t.clip.clip[0]},${t.clip.clip[1]},0,1) ` + toCss(t.local);
-          else
-            t.dom.style.transform = toCss(t.local);
-        } else t.dom.style.transform = toCss(t.local);
-        
-        if (t.scroll) {
-          t.dom.className = 't scroll';
-          if (alldata.preventscrollElem != t.scroll.element_id.id_) {
-            t.dom.scrollTop = t.scroll_offset[1];
-            t.dom.scrollLeft = t.scroll_offset[0];
-          }
-          t.dom.onscroll = function() {
-            //if (t.dom.scrollTop == t.scroll_offset[1] && t.dom.scrollLeft==t.scroll_offset[0]) return;
-            alldata.preventscroll++;
-            alldata.preventscrollElem = t.scroll.element_id.id_;
-            socket.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {alldata.preventscroll--;});
-          }
-        }   
+        ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+          this.domElement.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
 
-      } else {
-        // Root transform is recreation
-        t.dom = document.getElementById('recreation');
-      }
-    }
-    function createDOMLayerNode(l) {
-
-      if (!l.images || l.name == 'Frame Overlay Content Layer') return;
-
-      // Huh - looks like a scrollingcontents layer.  If so, set everything up appropriately
-      if (l.clip_tree_index.transform_id === l.scroll_tree_index.transform_id.parent_id  &&
-          l.scroll_tree_index.scrollable) {
-        l.scroll_tree_index.transform_id.scroll = l.scroll_tree_index;
-        l.scroll_tree_index.transform_id.clip = l.clip_tree_index;
-        
-        createDOMTransformNode(l.scroll_tree_index.transform_id, 0, l.scrolldom);
-        l.scrolldom = l.scroll_tree_index.transform_id.dom;
       }
 
-      createDOMTransformNode(l.transform_tree_index, l.zIndex, l.dom && l.dom.parentNode);
-            
-      if (!l.dom) {
-        l.dom=document.createElement('div');  // layer
+      decodeLayerInfo(l) {
+        var decoded = l.split('\n').map(x => x.split(':')).filter(x=>x.length>1).reduce((m, i) => (m[i[0].trim()] = i[1].trim(), m), {});
+
+        var res = {layerId: decoded.layer_id};
+        res.drawsContent = decoded.Bounds != '0x0';
+
+        res.name = decoded.name;
+        res.bounds = decoded.Bounds.split('x').map(x => parseInt(x));
+        res.offsetToTransformParent = decoded.OffsetToTransformParent.split(' ').map(x => parseFloat(x.replace(/[^\d.-]/g, '')));
+        res.clip_tree_index = parseInt(decoded.clip_tree_index);
+        res.effect_tree_index = parseInt(decoded.effect_tree_index);
+        res.scroll_tree_index = parseInt(decoded.scroll_tree_index);
+        res.transform_tree_index = parseInt(decoded.transform_tree_index);
+        return res
       }
-      if (l.dom.parentNode != l.transform_tree_index.dom) {
-        // Transforms have changed - we need to add/move our layer elsewhere.
-        l.transform_tree_index.dom.appendChild(l.dom);
-      }
-      
-      l.images && l.images.forEach(i => {
-        if (!i.dom) {
-          i.dom = document.createElement('img');
-          l.dom.appendChild(i.dom);
-          i.dom.src=i.image;
-          i.dom.style.position = 'absolute';
-          i.dom.style.top = i.clip.y + 'px';
-          i.dom.style.left = i.clip.x + 'px';
-        }
-      });
 
-      l.dom.style.top = l.offsetToTransformParent[1] + 'px';
-      l.dom.style.left = l.offsetToTransformParent[0]+ 'px';
-      l.dom.width=l.bounds[0];
-      l.dom.height=l.bounds[1];
-      l.dom.style.position = 'absolute';
-      l.dom.style.zIndex = l.zIndex;
-      l.dom.setAttribute('l'+l.layerId, l.name);
-      //l.dom.alt = l.name;
-      //l.dom.l = l;
-
-      l.targets && l.targets.forEach(t => {
-        createTargetNode(t, l);
-      });
-
-    }
-
-    function createTargetNode(t, l) {
-      var container = l.dom.parentNode;
-      if (!t.dom) t.dom=document.createElement('div')
-      if (t.dom.parentNode != container) container.appendChild(t.dom);
-      t.dom.style.left = t.containingQuads[0][0]+l.offsetToTransformParent[0]+'px';
-      t.dom.style.top = t.containingQuads[0][1]+l.offsetToTransformParent[1]+'px';
-      t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
-      t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
-      t.dom.className = 'link';
-    }
-
-    function toCss(matrix) {
-      var matrix = Array(16).fill().reverse().map((_,i) => matrix[Math.floor(i/4) + (i%4)*4]);
-      var res = 'matrix3d('+ matrix.join(',') + ')';
-      // Special case identity transform
-      if (res=="matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)") return '';
-      return res;
-    }
-
-    var alldata = {preventscroll: 0, nextLayerUpdates: []};
-
-    var layerDB = [];
-    var makeTrees = () => {
-      var clip_tree = alldata.proptrees.clip_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-      var effect_tree = alldata.proptrees.effect_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-      var scroll_tree = alldata.proptrees.scroll_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-      var transform_tree = alldata.proptrees.transform_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-
-      var layer_tree = layerDB;
-
-      function get_tree_node(a) {
-        if (Number.isInteger(a) || a === undefined) return a;
-        return a.id;
-      }
-      layer_tree.forEach(l => {
-        l.clip_tree_index = clip_tree[get_tree_node(l.clip_tree_index)];
-        l.effect_tree_index = effect_tree[get_tree_node(l.effect_tree_index)];
-        l.scroll_tree_index = scroll_tree[get_tree_node(l.scroll_tree_index)];
-        l.transform_tree_index = transform_tree[get_tree_node(l.transform_tree_index)];
-      });
-      transform_tree.forEach(l => {
-        l.parent_id = transform_tree[get_tree_node(l.parent_id)];
-      });
-      scroll_tree.forEach(l => {
-        l.parent_id = scroll_tree[get_tree_node(l.parent_id)];
-        l.transform_id = transform_tree[get_tree_node(l.transform_id)];
-      });
-      effect_tree.forEach(l => {
-        l.parent_id = effect_tree[get_tree_node(l.parent_id)];
-        l.transform_id = transform_tree[get_tree_node(l.transform_id)];
-        l.clip_id = clip_tree[get_tree_node(l.clip_id)];
-      });
-      clip_tree.forEach(l => {
-        l.parent_id = clip_tree[get_tree_node(l.parent_id)];
-        l.transform_id = transform_tree[get_tree_node(l.transform_id)];
-      });
-      
-      alldata = {...alldata, clip_tree, effect_tree, scroll_tree, transform_tree, layer_tree};
-
-    }
-    var updateScreen = () => {
-
-      // apply proptrees
-      alldata.proptrees = alldata.nextProptrees;
-
-      // apply layerupdates
-      alldata.nextLayerUpdates.forEach(params => {
-        var l = layerDB[params.layerId] = layerDB[params.layerId] || {};
-
-        if (params.layerDeleted) {
-          l.dom && l.dom.remove();
-          l.targets && l.targets.forEach(t => t.dom && t.dom.remove()); 
-          delete layerDB[params.layerId];
-          return;
-        }
-
-        if (params.layerInfo) {
-          layerDB[params.layerId] = l = {...l, ...decodeLayerInfo(params.layerInfo)};
-        }
-
-        if (params.zIndex)
-          l.zIndex=params.zIndex;
-
-        if (params.image) {
-          l.images = l.images || [];
-
-          // Cull images this new image covers up (note - this test could cull more things)
-          for (let i = l.images.length - 1; i >= 0; i--) {
-            if (l.images[i].clip.x >= params.clip.x &&
-              l.images[i].clip.y >= params.clip.y &&
-              l.images[i].clip.x + l.images[i].clip.width <= params.clip.x + params.clip.width &&
-              l.images[i].clip.y + l.images[i].clip.height <= params.clip.y + params.clip.height) {
-            l.images[i].dom && l.images[i].dom.remove();
-            l.images.splice(i, 1);
+      createDOMTransformNode(t, zIndex, adopt) {
+        if (t.parent_id) {
+          if (!t.dom && adopt)
+            // See if there is an element we might adopt
+            if (adopt.adoptable) {
+              t.dom = adopt
             }
+          this.createDOMTransformNode(t.parent_id, zIndex, t.dom && t.dom.parentNode);
+
+          if (!t.dom) {
+            t.dom = document.createElement('div');
+            t.parent_id.dom.appendChild(t.dom);
           }
-          l.images.push({image: params.image, clip: params.clip });
-        }
+          t.dom.adoptable = false;
+          
+          if (t.dom.parentNode != t.parent_id.dom) {
+            t.parent_id.dom.appendChild(t.dom);
+          }
+          t.dom.className = 't';
+          t.dom.setAttribute('t'+t.id, '');
+          this.sessionState.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
+          this.sessionState.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
+          t.dom.style.zIndex = t.dom.style.zIndex?Math.max(zIndex, t.dom.style.zIndex):zIndex;
 
-        if (params.targets) {
-          l.targets && l.targets.forEach(t => {
-            if (t.dom) {  // Adopt old element if possible
-              var res = params.targets.filter(y => y.backendNodeId==t.backendNodeId)[0];
-              if (res) res.dom = t.dom;
-              else t.dom.remove();
+          if (t.clip) {
+            t.dom.style.width = t.clip.clip[2] + 'px';
+            t.dom.style.height = t.clip.clip[3] + 'px';
+            t.dom.style.top = t.clip.clip[1] + 'px';
+            t.dom.style.left = t.clip.clip[0] + 'px';
+            if (t.clip.clip[0] || t.clip.clip[1])
+              t.dom.style.transform = `matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, ${t.clip.clip[0]},${t.clip.clip[1]},0,1) ` + this.toCss(t.local);
+            else
+              t.dom.style.transform = this.toCss(t.local);
+          } else t.dom.style.transform = this.toCss(t.local);
+          
+          if (t.scroll) {
+            t.dom.className = 't scroll';
+            if (this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
+              t.dom.scrollTop = t.scroll_offset[1];
+              t.dom.scrollLeft = t.scroll_offset[0];
             }
-          });
+            t.dom.onscroll = this.scrollHandler.bind(this, t);
+          }   
 
-          l.targets=params.targets;
+        } else {
+          // Root transform is the one given when the class was constructed
+          t.dom = this.domElement
         }
-      });
+      }
 
-      alldata.nextLayerUpdates = [];
+      scrollHandler(t, evt) {
+        this.sessionState.preventscroll++;
+        this.sessionState.preventscrollElem = t.scroll.element_id.id_;
+        //if (t.dom.scrollTop == t.scroll_offset[1] && t.dom.scrollLeft==t.scroll_offset[0]) return;
+        socket.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
+      }
+      createDOMLayerNode(l) {
 
-      // Mark all transform nodes as adoptable and set them back to no zindex
-      var old_transform_tree = alldata.transform_tree;
-      if (old_transform_tree) old_transform_tree.forEach(t => {
-        if (t.dom && t.parent_id) {
-          t.dom.style.zIndex=0;
-          t.dom.adoptable=true
+        if (!l.images || l.name == 'Frame Overlay Content Layer') return;
+
+        // Huh - looks like a scrollingcontents layer.  If so, set everything up appropriately
+        if (l.clip_tree_index.transform_id === l.scroll_tree_index.transform_id.parent_id  &&
+            l.scroll_tree_index.scrollable) {
+          l.scroll_tree_index.transform_id.scroll = l.scroll_tree_index;
+          l.scroll_tree_index.transform_id.clip = l.clip_tree_index;
+          
+          this.createDOMTransformNode(l.scroll_tree_index.transform_id, 0, l.scrolldom);
+          l.scrolldom = l.scroll_tree_index.transform_id.dom;
         }
 
-      });
+        this.createDOMTransformNode(l.transform_tree_index, l.zIndex, l.dom && l.dom.parentNode);
+              
+        if (!l.dom) {
+          l.dom=document.createElement('div');  // layer
+        }
+        if (l.dom.parentNode != l.transform_tree_index.dom) {
+          // Transforms have changed - we need to add/move our layer elsewhere.
+          l.transform_tree_index.dom.appendChild(l.dom);
+        }
+        
+        l.images && l.images.forEach(i => {
+          if (!i.dom) {
+            i.dom = document.createElement('img');
+            l.dom.appendChild(i.dom);
+            i.dom.src=i.image;
+            i.dom.style.position = 'absolute';
+            i.dom.style.top = i.clip.y + 'px';
+            i.dom.style.left = i.clip.x + 'px';
+          }
+        });
 
-      makeTrees();
+        l.dom.style.top = l.offsetToTransformParent[1] + 'px';
+        l.dom.style.left = l.offsetToTransformParent[0]+ 'px';
+        l.dom.width=l.bounds[0];
+        l.dom.height=l.bounds[1];
+        l.dom.style.position = 'absolute';
+        l.dom.style.zIndex = l.zIndex;
+        l.dom.setAttribute('l'+l.layerId, l.name);
+        //l.dom.alt = l.name;
+        //l.dom.l = l;
 
-      
-      layerDB.forEach(l => {
-        createDOMLayerNode(l);
-      });
+        l.targets && l.targets.forEach(t => {
+          this.createTargetNode(t, l);
+        });
 
-      // remove unowned transform nodes
-      if (old_transform_tree) old_transform_tree.forEach(t => {
-        if (t.dom && (t.dom.adoptable==true))
-          t.dom.remove();
-      });
-    };
-    
+      }
+
+      targetClick(evt) {
+        socket.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
+        evt.stopPropagation();
+      }
+
+      createTargetNode(t, l) {
+        var container = l.dom.parentNode;
+        if (!t.dom) t.dom=document.createElement('div')
+        if (t.dom.parentNode != container) container.appendChild(t.dom);
+        t.dom.style.left = t.containingQuads[0][0]+l.offsetToTransformParent[0]+'px';
+        t.dom.style.top = t.containingQuads[0][1]+l.offsetToTransformParent[1]+'px';
+        t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
+        t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
+        t.dom.onclick = this.targetClick;
+        t.dom.metadata = t;
+        t.dom.className = 'link';
+      }
+
+      toCss(matrix) {
+        var matrix = Array(16).fill().reverse().map((_,i) => matrix[Math.floor(i/4) + (i%4)*4]);
+        var res = 'matrix3d('+ matrix.join(',') + ')';
+        // Special case identity transform
+        if (res=="matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)") return '';
+        return res;
+      }
+
+
+      makeTrees() {
+        var clip_tree = this.sessionState.proptrees.clip_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var effect_tree = this.sessionState.proptrees.effect_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var scroll_tree = this.sessionState.proptrees.scroll_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var transform_tree = this.sessionState.proptrees.transform_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+
+        var layer_tree = this.layerDB;
+
+        function get_tree_node(a) {
+          if (Number.isInteger(a) || a === undefined) return a;
+          return a.id;
+        }
+        layer_tree.forEach(l => {
+          l.clip_tree_index = clip_tree[get_tree_node(l.clip_tree_index)];
+          l.effect_tree_index = effect_tree[get_tree_node(l.effect_tree_index)];
+          l.scroll_tree_index = scroll_tree[get_tree_node(l.scroll_tree_index)];
+          l.transform_tree_index = transform_tree[get_tree_node(l.transform_tree_index)];
+        });
+        transform_tree.forEach(l => {
+          l.parent_id = transform_tree[get_tree_node(l.parent_id)];
+        });
+        scroll_tree.forEach(l => {
+          l.parent_id = scroll_tree[get_tree_node(l.parent_id)];
+          l.transform_id = transform_tree[get_tree_node(l.transform_id)];
+        });
+        effect_tree.forEach(l => {
+          l.parent_id = effect_tree[get_tree_node(l.parent_id)];
+          l.transform_id = transform_tree[get_tree_node(l.transform_id)];
+          l.clip_id = clip_tree[get_tree_node(l.clip_id)];
+        });
+        clip_tree.forEach(l => {
+          l.parent_id = clip_tree[get_tree_node(l.parent_id)];
+          l.transform_id = transform_tree[get_tree_node(l.transform_id)];
+        });
+        
+        this.sessionState = {...this.sessionState, clip_tree, effect_tree, scroll_tree, transform_tree, layer_tree};
+
+      }
+      updateScreen() {
+
+        // apply proptrees
+        this.sessionState.proptrees = this.sessionState.nextProptrees;
+
+        // apply layerupdates
+        this.sessionState.nextLayerUpdates.forEach(params => {
+          var l = this.layerDB[params.layerId] = this.layerDB[params.layerId] || {};
+
+          if (params.layerDeleted) {
+            l.dom && l.dom.remove();
+            l.targets && l.targets.forEach(t => t.dom && t.dom.remove()); 
+            delete this.layerDB[params.layerId];
+            return;
+          }
+
+          if (params.layerInfo) {
+            this.layerDB[params.layerId] = l = {...l, ...this.decodeLayerInfo(params.layerInfo)};
+          }
+
+          if (params.zIndex)
+            l.zIndex=params.zIndex;
+
+          if (params.image) {
+            l.images = l.images || [];
+
+            // Cull images this new image covers up (note - this test could cull more things)
+            for (let i = l.images.length - 1; i >= 0; i--) {
+              if (l.images[i].clip.x >= params.clip.x &&
+                l.images[i].clip.y >= params.clip.y &&
+                l.images[i].clip.x + l.images[i].clip.width <= params.clip.x + params.clip.width &&
+                l.images[i].clip.y + l.images[i].clip.height <= params.clip.y + params.clip.height) {
+              l.images[i].dom && l.images[i].dom.remove();
+              l.images.splice(i, 1);
+              }
+            }
+            l.images.push({image: params.image, clip: params.clip });
+          }
+
+          if (params.targets) {
+            l.targets && l.targets.forEach(t => {
+              if (t.dom) {  // Adopt old element if possible
+                var res = params.targets.filter(y => y.backendNodeId==t.backendNodeId)[0];
+                if (res) res.dom = t.dom;
+                else t.dom.remove();
+              }
+            });
+
+            l.targets=params.targets;
+          }
+        });
+
+        this.sessionState.nextLayerUpdates = [];
+
+        // Mark all transform nodes as adoptable and set them back to no zindex
+        var old_transform_tree = this.sessionState.transform_tree;
+        if (old_transform_tree) old_transform_tree.forEach(t => {
+          if (t.dom && t.parent_id) {
+            t.dom.style.zIndex=0;
+            t.dom.adoptable=true
+          }
+
+        });
+
+        this.makeTrees();
+
+        
+        this.layerDB.forEach(l => {
+          this.createDOMLayerNode(l);
+        });
+
+        // remove unowned transform nodes
+        if (old_transform_tree) old_transform_tree.forEach(t => {
+          if (t.dom && (t.dom.adoptable==true))
+            t.dom.remove();
+        });
+      }
+      resize() {
+        socket.req('Emulation.setDeviceMetricsOverride', {
+          height: this.domElement.offsetHeight,
+          width: this.domElement.offsetWidth,
+          deviceScaleFactor: window.devicePixelRatio,
+          mobile: true
+        }); 
+      }
+
+      touch(n, e){
+        socket.req('Input.dispatchTouchEvent', {
+          type: n,
+          touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
+        });
+      }
+    }
+        
     window.addEventListener('DOMContentLoaded', async (event) => {
       
       socket = await wsPromise;
 
       window.socket = socket;  // for testing
+
+      var sessions = [];
 
       // All these are run serially on startup, but none depend on a
       // response from a request.  The intention is a server can fire
@@ -436,26 +492,19 @@
       socket.eventListeners['Target.attachedToTarget'] = [ msg => {
         // TODO:  Handle case of multiple targets/sessions/windows etc.
         console.log("new target", msg);
-        socket.setSessionId(msg.sessionId)
+
+        var newElem = document.createElement('bb-session');
+        document.getElementById('recreation').appendChild(newElem);
+        sessions.push(new Session(socket, msg.sessionId, newElem));
+
+        socket.setSessionId(msg.sessionId);
         socket.req('Page.navigate', {url: currentURL()});
         socket.req('Page.enable');
         socket.req('PageStream.enable');
 
-        resize();      
+        resize();     
       }]
 
-      socket.eventListeners['PageStream.streamLayerInfo'] = [ msg => {
-        alldata.nextLayerUpdates = alldata.nextLayerUpdates || [];
-        alldata.nextLayerUpdates.push(msg.layerUpdate);
-      }];
-
-      socket.eventListeners['PageStream.streamPropTrees'] = [ params => {
-        alldata.nextProptrees = JSON.parse(params.propertyTreesJSON);
-      }];
-      
-      socket.eventListeners['PageStream.frameDone'] = [ () => {
-        updateScreen();
-      }];
 
       socket.eventListeners['Target.targetInfoChanged'] = [ params => {
         // Update URL and page title
@@ -468,25 +517,10 @@
       }];
 
       var resize = () => {
-        socket.req('Emulation.setDeviceMetricsOverride', {
-          height: document.documentElement.clientHeight,
-          width: document.documentElement.clientWidth,
-          deviceScaleFactor: window.devicePixelRatio,
-          mobile: true
-        })
+        sessions.forEach(x=> x.resize());
       }
       window.addEventListener('resize', resize);
       
-      var touch = (n, e) => {
-        socket.req('Input.dispatchTouchEvent', {
-          type: n,
-          touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
-        });
-      };
-      document.body.addEventListener('touchstart', touch.bind(null, 'touchStart'), {passive: true});
-      document.body.addEventListener('touchend', touch.bind(null, 'touchEnd'), {passive: true});
-      document.body.addEventListener('touchcancel', touch.bind(null, 'touchCancel'), {passive: true});
-      document.body.addEventListener('touchmove', touch.bind(null, 'touchMove'), {passive: true});
     });
 
   </script>

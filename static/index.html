@@ -178,17 +178,41 @@
       return document.location.href;
     }
 
+    function deepClone(obj, hash = new WeakMap()) {
+        // Do not try to clone primitives or functions
+        if (Object(obj) !== obj) return obj;
+        if (obj instanceof Function || obj instanceof HTMLElement)
+          return undefined;
+        if (hash.has(obj)) return hash.get(obj); // Cyclic reference
+        var result = new obj.constructor();
+        // Register in hash    
+        hash.set(obj, result);
+        // Clone and assign enumerable own properties recursively
+        return Object.assign(result, ...Object.keys(obj).map (
+            key => ({ [key]: deepClone(obj[key], hash) }) ));
+    }
 
     class Session {
-      constructor(ws, domElement) {
+      constructor(ws, domElement, baseSession) {
+        this.sessionState = {preventscroll: 0, nextLayerUpdates: [], layer_tree: []};
+
         this.ws = ws;
         this.domElement = domElement;
-        this.sessionState = {preventscroll: 0, nextLayerUpdates: []};
+        this.onNewSession = () => {};
 
-        this.layerDB = [];
+        if (baseSession) {
+          this.sessionState = deepClone(baseSession);
+
+          // Create dom nodes for everything.
+          this.sessionState.layer_tree.forEach(l => {
+            this.createDOMLayerNode(l);
+          });
+        }
 
         ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
           this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
+          // Create any sessions for event target clicks, because they could start sending data right away.
+          msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=>x.sessionId && this.onNewSession(ws.wrappedSocket, x.sessionId, this));
         };
 
         ws.eventListeners['PageStream.streamPropTrees'] =  params => {
@@ -240,8 +264,8 @@
           }
           t.dom.className = 't';
           t.dom.setAttribute('t'+t.id, '');
-          this.sessionState.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
-          this.sessionState.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
+          //this.sessionState.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
+          //this.sessionState.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
           t.dom.style.zIndex = t.dom.style.zIndex?Math.max(zIndex, t.dom.style.zIndex):zIndex;
 
           if (t.clip) {
@@ -354,13 +378,13 @@
       }
 
 
-      makeTrees() {
-        var clip_tree = this.sessionState.proptrees.clip_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-        var effect_tree = this.sessionState.proptrees.effect_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-        var scroll_tree = this.sessionState.proptrees.scroll_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
-        var transform_tree = this.sessionState.proptrees.transform_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+      makeTrees(propTrees) {
+        var clip_tree = propTrees.clip_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var effect_tree = propTrees.effect_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var scroll_tree = propTrees.scroll_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
+        var transform_tree = propTrees.transform_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
 
-        var layer_tree = this.layerDB;
+        var layer_tree = this.sessionState.layer_tree;
 
         function get_tree_node(a) {
           if (Number.isInteger(a) || a === undefined) return a;
@@ -393,23 +417,19 @@
 
       }
       updateScreen() {
-
-        // apply proptrees
-        this.sessionState.proptrees = this.sessionState.nextProptrees;
-
         // apply layerupdates
         this.sessionState.nextLayerUpdates.forEach(params => {
-          var l = this.layerDB[params.layerId] = this.layerDB[params.layerId] || {};
+          var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || {};
 
           if (params.layerDeleted) {
             l.dom && l.dom.remove();
             l.targets && l.targets.forEach(t => t.dom && t.dom.remove()); 
-            delete this.layerDB[params.layerId];
+            delete this.sessionState.layer_tree[params.layerId];
             return;
           }
 
           if (params.layerInfo) {
-            this.layerDB[params.layerId] = l = {...l, ...this.decodeLayerInfo(params.layerInfo)};
+            this.sessionState.layer_tree[params.layerId] = l = {...l, ...this.decodeLayerInfo(params.layerInfo)};
           }
 
           if (params.zIndex)
@@ -456,10 +476,11 @@
 
         });
 
-        this.makeTrees();
-
+        // apply proptrees
+        this.makeTrees(this.sessionState.nextProptrees);
         
-        this.layerDB.forEach(l => {
+        // Create or adopt all layers, (and by extension scrolls, clips, transforms and targets)
+        this.sessionState.layer_tree.forEach(l => {
           this.createDOMLayerNode(l);
         });
 
@@ -469,6 +490,7 @@
             t.dom.remove();
         });
       }
+
       resize() {
         this.ws.req('Emulation.setDeviceMetricsOverride', {
           height: this.domElement.offsetHeight,
@@ -492,7 +514,7 @@
 
       window.socket = socket;  // for testing
 
-      var sessions = [];
+      var sessions = {};
 
       // All these are run serially on startup, but none depend on a
       // response from a request.  The intention is a server can fire
@@ -505,28 +527,31 @@
         }
       };
 
-      function addSession(ws, sessionId, existingSession) {
+      function addSession(socket, sessionId, existingSession) {
+        if (sessions[sessionId]) return;
         
         var newElem = document.createElement('bb-session');
         document.getElementById('recreation').appendChild(newElem);
 
+        var ws = new devToolsWebsocketWrapper(socket, sessionId);
+        
         var sess = new Session(ws, newElem, existingSession);
-        sessions.push(sess);
+        sessions[sessionId] = sess;
 
         sess.onNewSession = addSession;
+        return sess;
       }
 
       socket.eventListeners['Target.attachedToTarget'] = msg => {
         // TODO:  Handle case of multiple targets/sessions/windows etc.
         console.log("new target", msg);
 
-        var ws = new devToolsWebsocketWrapper(socket, msg.sessionId);
         
-        addSession(ws,  msg.sessionId, null);
+        var sess = addSession(socket,  msg.sessionId, null);
 
-        ws.req('Page.navigate', {url: currentURL()});
-        ws.req('Page.enable');
-        ws.req('PageStream.enable');
+        sess.ws.req('Page.navigate', {url: currentURL()});
+        sess.ws.req('Page.enable');
+        sess.ws.req('PageStream.enable');
 
         resize();     
       };
@@ -543,7 +568,7 @@
       };
 
       var resize = () => {
-        sessions.forEach(x=> x.resize());
+        Object.values(sessions).forEach(x=> x.resize());
       }
       window.addEventListener('resize', resize);
       

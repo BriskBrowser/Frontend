@@ -6,7 +6,7 @@
 
     bb-session {
       width: 300px;
-      height: 300px;
+      height: 200px;
       position: relative;
       display: block;
     }
@@ -112,7 +112,7 @@
         return this.wrappedSocket.req(this.sessionId, method, params);
       }
       handleMessage = (msg) => {
-        if (this.eventListeners[msg.method])
+        if (msg.sessionId == this.sessionId  && this.eventListeners[msg.method])
             this.eventListeners[msg.method](msg.params);
       }
       destroy = () => {
@@ -201,7 +201,7 @@
         this.onNewSession = () => {};
 
         if (baseSession) {
-          this.sessionState = deepClone(baseSession);
+          this.sessionState = deepClone(baseSession.sessionState);
 
           // Create dom nodes for everything.
           this.sessionState.layer_tree.forEach(l => {
@@ -209,17 +209,17 @@
           });
         }
 
-        ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
+        this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
           this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
           // Create any sessions for event target clicks, because they could start sending data right away.
           msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=>x.sessionId && this.onNewSession(ws.wrappedSocket, x.sessionId, this));
         };
 
-        ws.eventListeners['PageStream.streamPropTrees'] =  params => {
+        this.ws.eventListeners['PageStream.streamPropTrees'] =  params => {
           this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
         };
         
-        ws.eventListeners['PageStream.frameDone'] = () => {
+        this.ws.eventListeners['PageStream.frameDone'] = () => {
           this.updateScreen();
         };
 

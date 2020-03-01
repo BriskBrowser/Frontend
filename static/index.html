@@ -6,6 +6,7 @@
     bb-session.old-active {
       top: 0px !important;
       transform: scale(1);
+      filter: brightness(50%);
       right: 0px;
       z-index: 0;
     }
@@ -547,7 +548,11 @@
       };
 
       function sessionActivate(sessionId) {
-        Object.keys(sessions).forEach((sid) => sessions[sid].domElement.classList.toggle('active', sid==sessionId));
+        Object.keys(sessions).forEach((sid) => {
+          var cl = sessions[sid].domElement.classList;
+          cl.replace('active', 'old-active');
+          cl.toggle('active', sid==sessionId);
+        });
       }
       
 

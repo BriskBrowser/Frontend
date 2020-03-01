@@ -3,12 +3,34 @@
 <head>
   <meta name="viewport" content="width=device-width, user-scalable=no">
   <style>
-
-    bb-session {
-      width: 300px;
-      height: 200px;
-      position: relative;
+    bb-session.old-active {
+      top: 0px !important;
+      transform: scale(1);
+      right: 0px;
+      z-index: 0;
+    }
+    bb-session.active {
+      top: 0px !important;
+      transform: scale(1);
+      right: 0px;
+      z-index: 1;
+    }
+    bb-sesssion {
+      position: fixed;
       display: block;
+      transition: transform 0.5s;
+      /* overflow: auto; */
+      right: -10%;
+      transform: scale(0.2);
+      transform-origin: top right;
+      width: 100%;
+      transition: transform 0.5s, top 0.5s, width 0.5s, height 0.5s;
+      top: 0px;
+      right: 0px;
+      transform: scale(0.2);
+      transform-origin: top right;
+      width: 100%;
+      z-index: 2;
     }
 
     .link {
@@ -262,7 +284,7 @@
           if (t.dom.parentNode != t.parent_id.dom) {
             t.parent_id.dom.appendChild(t.dom);
           }
-          t.dom.className = 't';
+          t.dom.classList.add('t');
           t.dom.setAttribute('t'+t.id, '');
           //this.sessionState.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
           //this.sessionState.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
@@ -279,14 +301,12 @@
               t.dom.style.transform = this.toCss(t.local);
           } else t.dom.style.transform = this.toCss(t.local);
           
-          if (t.scroll) {
-            t.dom.className = 't scroll';
-            if (this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
-              t.dom.scrollTop = t.scroll_offset[1];
-              t.dom.scrollLeft = t.scroll_offset[0];
-            }
-            t.dom.onscroll = this.scrollHandler.bind(this, t);
-          }   
+          if (t.scroll && this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
+            t.dom.scrollTop = t.scroll_offset[1];
+            t.dom.scrollLeft = t.scroll_offset[0];
+          }
+          t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
+          t.dom.classList.toggle('scroll', t.scroll)
 
         } else {
           // Root transform is the one given when the class was constructed
@@ -352,6 +372,10 @@
       }
 
       targetClick(evt) {
+        if (evt.currentTarget.metadata.sessionId) {
+          // Means we have preloaded this click - we just need to transfer to that session.
+          this.onSessionActivate(evt.currentTarget.metadata.sessionId);
+        }
         this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
         evt.stopPropagation();
       }
@@ -366,7 +390,7 @@
         t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
         t.dom.onclick = this.targetClick.bind(this);
         t.dom.metadata = t;
-        t.dom.className = 'link';
+        t.dom.classList.add('link');
       }
 
       toCss(matrix) {
@@ -493,8 +517,8 @@
 
       resize() {
         this.ws.req('Emulation.setDeviceMetricsOverride', {
-          height: this.domElement.offsetHeight,
-          width: this.domElement.offsetWidth,
+          height: window.innerHeight,
+          width: Math.floor(window.innerWidth*0.9),
           deviceScaleFactor: window.devicePixelRatio,
           mobile: true
         }); 
@@ -527,6 +551,11 @@
         }
       };
 
+      function sessionActivate(sessionId) {
+        Object.keys(sessions).forEach((sid) => sessions[sid].domElement.classList.toggle('active', sid==sessionId));
+      }
+      
+
       function addSession(socket, sessionId, existingSession) {
         if (sessions[sessionId]) return;
         
@@ -539,6 +568,8 @@
         sessions[sessionId] = sess;
 
         sess.onNewSession = addSession;
+        sess.onSessionActivate = sessionActivate;
+
         return sess;
       }
 
@@ -548,6 +579,7 @@
 
         
         var sess = addSession(socket,  msg.sessionId, null);
+        sess.domElement.classList.add('active');
 
         sess.ws.req('Page.navigate', {url: currentURL()});
         sess.ws.req('Page.enable');
@@ -558,6 +590,7 @@
 
 
       socket.eventListeners['Target.targetInfoChanged'] = params => {
+        return; // TODO:  Fix
         // Update URL and page title
         if (params.targetInfo.url.startsWith('http'))
           if (currentURL() != params.targetInfo.url)

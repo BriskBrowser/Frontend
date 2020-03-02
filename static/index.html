@@ -526,6 +526,11 @@
           touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
         });
       }
+
+      destroy() {
+        this.ws.destroy();
+        this.domElement.parentNode.removeChild(this.domElement);
+      }
     }
         
     window.addEventListener('DOMContentLoaded', async (event) => {
@@ -567,8 +572,13 @@
         var sess = new Session(ws, newElem, existingSession);
         sessions[sessionId] = sess;
 
+
         sess.onNewSession = addSession;
         sess.onSessionActivate = sessionActivate;
+
+        Object.keys(sessions).forEach((x, index)=> {
+          sessions[x].domElement.style.top = ((index-1)/(Object.keys(sessions).length)*100) + '%';
+        });
 
         return sess;
       }
@@ -588,6 +598,10 @@
         resize();     
       };
 
+      socket.eventListeners['Target.detachedFromTarget'] = msg => {
+        sessions[msg.sessionId].destroy();
+        delete sessions[msg.sessionId];
+      }
 
       socket.eventListeners['Target.targetInfoChanged'] = params => {
         return; // TODO:  Fix

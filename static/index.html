@@ -15,11 +15,12 @@
       transform: scale(1);
       right: 0px;
       z-index: 1;
+      display: block;
     }
     bb-session {
       position: fixed;
-      display: block;
-      transition: transform 0.2s;
+      display: none;
+      transition: all 20s;
       /* overflow: auto; */
       right: -10%;
       transform: scale(0.2);
@@ -295,14 +296,16 @@
               t.dom.style.transform = `matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, ${t.clip.clip[0]},${t.clip.clip[1]},0,1) ` + this.toCss(t.local);
             else
               t.dom.style.transform = this.toCss(t.local);
-          } else t.dom.style.transform = this.toCss(t.local);
+          } else {
+            t.dom.style.transform = this.toCss(t.local);
+          }
           
           if (t.scroll && this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
             t.dom.scrollTop = t.scroll_offset[1];
             t.dom.scrollLeft = t.scroll_offset[0];
           }
           t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
-          t.dom.classList.toggle('scroll', t.scroll)
+          t.dom.classList.toggle('scroll', !!t.scroll)
 
         } else {
           // Root transform is the one given when the class was constructed
@@ -593,7 +596,7 @@
 
         sess.ws.req('Page.navigate', {url: currentURL()});
         sess.ws.req('Page.enable');
-        sess.ws.req('PageStream.enable');
+        sess.ws.req('PageStream.enable', {fps: 0});
 
         resize();     
       };
@@ -622,7 +625,7 @@
     });
 
   </script>
-  <script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script>
+  <!-- <script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script> -->
   <script>
     window.googletag = window.googletag || {cmd: []};
     googletag.cmd.push(function() {

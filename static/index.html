@@ -19,8 +19,8 @@
     }
     bb-session {
       position: fixed;
-      display: none;
-      transition: all 20s;
+      /* display: none; */
+      transition: all 0.2s;
       /* overflow: auto; */
       right: -10%;
       transform: scale(0.2);
@@ -37,6 +37,10 @@
       position: absolute;
       border: 0.5px solid rgba(255,0,0,0.4);
       border-radius: 3px;
+    }
+
+    .link.alive {
+      border: 0.5px solid rgba(0,2555,0,0.4);
     }
 
     .t {
@@ -218,6 +222,8 @@
         this.ws = ws;
         this.domElement = domElement;
         this.onNewSession = () => {};
+        this.onSessionActivate = () => {};
+        this.onSessionSetHeight = () => {};
 
         if (baseSession) {
           this.sessionState = deepClone(baseSession.sessionState);
@@ -231,7 +237,9 @@
         this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
           this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
           // Create any sessions for event target clicks, because they could start sending data right away.
-          msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=>x.sessionId && this.onNewSession(ws.wrappedSocket, x.sessionId, this));
+          msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
+            x.sessionId && this.onNewSession(ws.wrappedSocket, x.sessionId, this)
+          });
         };
 
         this.ws.eventListeners['PageStream.streamPropTrees'] =  params => {
@@ -313,11 +321,22 @@
         }
       }
 
+      updateTargetHeights() {
+        this.sessionState.layer_tree.forEach(l => {
+          Object.keys(l.targets).forEach(backendNodeId => {
+            var t = l.targets[backendNodeId];
+            // TODO:  Should take into account all the layer transforms and scroll positions
+            t.sessionId && t.containingQuads && this.onSessionSetHeight(t.sessionId, t.containingQuads[0][1])
+          })
+        });
+      }
+
       scrollHandler(t, evt) {
         this.sessionState.preventscroll++;
         this.sessionState.preventscrollElem = t.scroll.element_id.id_;
         //if (t.dom.scrollTop == t.scroll_offset[1] && t.dom.scrollLeft==t.scroll_offset[0]) return;
         this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
+        this.updateTargetHeights();
       }
       createDOMLayerNode(l) {
 
@@ -364,8 +383,8 @@
         //l.dom.alt = l.name;
         //l.dom.l = l;
 
-        l.targets && l.targets.forEach(t => {
-          this.createTargetNode(t, l);
+        l.targets && Object.keys(l.targets).forEach(t => {
+          this.createTargetNode(l.targets[t], l);
         });
 
       }
@@ -380,6 +399,7 @@
       }
 
       createTargetNode(t, l) {
+        if (!t.containingQuads) return;
         var container = l.dom.parentNode;
         if (!t.dom) t.dom=document.createElement('div')
         if (t.dom.parentNode != container) container.appendChild(t.dom);
@@ -390,6 +410,7 @@
         t.dom.onclick = this.targetClick.bind(this);
         t.dom.metadata = t;
         t.dom.classList.add('link');
+        t.dom.classList.toggle('alive', !!t.sessionId);
       }
 
       toCss(matrix) {
@@ -442,11 +463,11 @@
       updateScreen() {
         // apply layerupdates
         this.sessionState.nextLayerUpdates.forEach(params => {
-          var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || {};
+          var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || { targets: {}};
 
           if (params.layerDeleted) {
             l.dom && l.dom.remove();
-            l.targets && l.targets.forEach(t => t.dom && t.dom.remove()); 
+            l.targets && Object.keys(l.targets).forEach(t => l.targets[t].dom && l.targets[t].dom.remove()); 
             delete this.sessionState.layer_tree[params.layerId];
             return;
           }
@@ -458,33 +479,36 @@
           if (params.zIndex)
             l.zIndex=params.zIndex;
 
-          if (params.image) {
+          if (params.bufferUpdates) {
             l.images = l.images || [];
 
-            // Cull images this new image covers up (note - this test could cull more things)
-            for (let i = l.images.length - 1; i >= 0; i--) {
-              if (l.images[i].clip.x >= params.clip.x &&
-                l.images[i].clip.y >= params.clip.y &&
-                l.images[i].clip.x + l.images[i].clip.width <= params.clip.x + params.clip.width &&
-                l.images[i].clip.y + l.images[i].clip.height <= params.clip.y + params.clip.height) {
-              l.images[i].dom && l.images[i].dom.remove();
-              l.images.splice(i, 1);
+            params.bufferUpdates.forEach(bufUpdate => {
+              // Cull images this new image covers up (note - this test could cull more things)
+              for (let i = l.images.length - 1; i >= 0; i--) {
+                if (l.images[i].clip.x >= bufUpdate.clip.x &&
+                  l.images[i].clip.y >= bufUpdate.clip.y &&
+                  l.images[i].clip.x + l.images[i].clip.width <= bufUpdate.clip.x + bufUpdate.clip.width &&
+                  l.images[i].clip.y + l.images[i].clip.height <= bufUpdate.clip.y + bufUpdate.clip.height) {
+                l.images[i].dom && l.images[i].dom.remove();
+                l.images.splice(i, 1);
+                }
               }
-            }
-            l.images.push({image: params.image, clip: params.clip });
+              l.images.push({image: bufUpdate.image, clip: bufUpdate.clip });
+            });
           }
 
           if (params.targets) {
-            l.targets && l.targets.forEach(t => {
-              if (t.dom) {  // Adopt old element if possible
-                var res = params.targets.filter(y => y.backendNodeId==t.backendNodeId)[0];
-                if (res) res.dom = t.dom;
-                else t.dom.remove();
+            params.targets.forEach(t => {
+              if (t.targetDeleted) {
+                var old_target = l.targets[t.backendNodeId]
+                old_target.dom && old_target.dom.remove();
+                delete l.targets[t.backendNodeId];
+              } else {
+                l.targets[t.backendNodeId] = l.targets[t.backendNodeId] || {};
+                Object.assign(l.targets[t.backendNodeId], t);
               }
             });
-
-            l.targets=params.targets;
-          }
+          };
         });
 
         this.sessionState.nextLayerUpdates = [];
@@ -512,6 +536,7 @@
           if (t.dom && (t.dom.adoptable==true))
             t.dom.remove();
         });
+        this.updateTargetHeights();
       }
 
       resize() {
@@ -543,6 +568,7 @@
       window.socket = socket;  // for testing
 
       var sessions = {};
+      var activeSession;
 
       // All these are run serially on startup, but none depend on a
       // response from a request.  The intention is a server can fire
@@ -555,12 +581,31 @@
         }
       };
 
+      function arrangeSessions() {
+        var ca = sessions[activeSession].childArrangement;
+        if (!ca) return;
+        var eligibleSessions = Object.keys(ca).filter(x => x in sessions);
+        eligibleSessions.sort((a,b) => ca[a] - ca[b]);
+
+        eligibleSessions.forEach((x, index)=> {
+          sessions[x].domElement.style.top = (index/(eligibleSessions.length)*100) + '%';
+        });
+      }
+
+      function sessionSetHeight(fromSessionId, toSessionId, height) {
+        sessions[fromSessionId].childArrangement = sessions[fromSessionId].childArrangement || {};
+        sessions[fromSessionId].childArrangement[toSessionId] = height;
+        arrangeSessions();
+      }
+
       function sessionActivate(sessionId) {
         Object.keys(sessions).forEach((sid) => {
           var cl = sessions[sid].domElement.classList;
           cl.replace('active', 'old-active');
           cl.toggle('active', sid==sessionId);
         });
+        activeSession = sessionId;
+        arrangeSessions();
       }
       
 
@@ -575,13 +620,15 @@
         var sess = new Session(ws, newElem, existingSession);
         sessions[sessionId] = sess;
 
-
+        // Event emitted whenever this session wants to trigger the creation of a clone of itself.
         sess.onNewSession = addSession;
+
+        // Event emitted whenever this session wants to activate another session.
         sess.onSessionActivate = sessionActivate;
 
-        Object.keys(sessions).forEach((x, index)=> {
-          sessions[x].domElement.style.top = ((index-1)/(Object.keys(sessions).length)*100) + '%';
-        });
+        // UX data linkage to allow non-active sessions to be rendered on the screen at positions
+        // dependant on the links which will activate them.  Called repeatedly on scroll.
+        sess.onSessionSetHeight = sessionSetHeight.bind(this, sessionId);
 
         return sess;
       }
@@ -592,18 +639,19 @@
 
         
         var sess = addSession(socket,  msg.sessionId, null);
-        sess.domElement.classList.add('active');
+        sessionActivate(msg.sessionId);
 
         sess.ws.req('Page.navigate', {url: currentURL()});
         sess.ws.req('Page.enable');
         sess.ws.req('PageStream.enable', {fps: 0});
 
-        resize();     
+        resize();
       };
 
       socket.eventListeners['Target.detachedFromTarget'] = msg => {
         sessions[msg.sessionId].destroy();
         delete sessions[msg.sessionId];
+        arrangeSessions();
       }
 
       socket.eventListeners['Target.targetInfoChanged'] = params => {

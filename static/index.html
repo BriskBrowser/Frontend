@@ -70,7 +70,7 @@
       //  * Otherwise, connect to document.location.host
 
       //websocketServer: 'wss://server.example.com/',
-      //websocketServer: 'ws://localhost:12159',
+      websocketServer: 'ws://localhost:12159',
     
       // It's a dns based pool with a custom load balancing algorithm.
       // servers are expected to register at n.serverpool.com, where n is an integer from 0 to ~ the pool
@@ -370,6 +370,8 @@
             i.dom.style.position = 'absolute';
             i.dom.style.top = i.clip.y + 'px';
             i.dom.style.left = i.clip.x + 'px';
+            //i.dom.width = i.clip.width;
+            //i.dom.height = i.clip.height;
           }
         });
 

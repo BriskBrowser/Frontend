@@ -195,9 +195,10 @@
     let wsPromise = selectWebsocket(options);
 
     function currentURL() {
-      if (document.location.pathname.startsWith('/http')) {
-        return document.location.pathname.substring(1)+document.location.search+document.location.hash;
-      }
+      var path = document.location.pathname;
+      var search = document.location.search;
+      if (path.startsWith('/http')) return path.substring(1)+search+document.location.hash;
+      if (search.startsWith('?http')) return search.substring(1)+document.location.hash;
       return document.location.href;
     }
 

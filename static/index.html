@@ -70,7 +70,7 @@
       //  * Otherwise, connect to document.location.host
 
       //websocketServer: 'wss://server.example.com/',
-      //websocketServer: 'ws://localhost:12159',
+      websocketServer: 'ws://localhost:12159',
     
       // It's a dns based pool with a custom load balancing algorithm.
       // servers are expected to register at n.serverpool.com, where n is an integer from 0 to ~ the pool
@@ -195,9 +195,10 @@
     let wsPromise = selectWebsocket(options);
 
     function currentURL() {
-      if (document.location.pathname.startsWith('/http')) {
-        return document.location.pathname.substring(1)+document.location.search+document.location.hash;
-      }
+      var path = document.location.pathname;
+      var search = document.location.search;
+      if (path.startsWith('/http')) return path.substring(1)+search+document.location.hash;
+      if (search.startsWith('?http')) return search.substring(1)+document.location.hash;
       return document.location.href;
     }
 

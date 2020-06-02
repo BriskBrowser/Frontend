@@ -30,6 +30,12 @@
       z-index: 2;
     }
 
+    bb-session.fullscreen:not(.active){
+      /* Push inactive sessions completely offscreen */
+      right: -20%;
+      transition: none;
+    }
+
     .link {
       background-color: rgba(255,0,0,0.1);
       z-index: 9999;
@@ -81,12 +87,10 @@
       // fastbrowser.omattos.com is provided without any SLA.  Expect to be blocked if you apply too much load.
       //websocketPool: 'fastbrowser.omattos.com',
 
-      // Initial page to render
-      startPage: "https://www.wikipedia.org/",
-
-      // Options set dynamically by the server
-      // %SERVEROPTIONS%
+      // Don't display previews of future windows
+      fullscreen: false,
     }
+    BBOptionsOverrides && Object.assign(options, BBOptionsOverrides)
 
     // Implements the chrome devtools protocol on top of a websocket.
     class devToolsWebsocket extends WebSocket {
@@ -371,8 +375,8 @@
             i.dom.style.position = 'absolute';
             i.dom.style.top = i.clip.y + 'px';
             i.dom.style.left = i.clip.x + 'px';
-            //i.dom.width = i.clip.width;
-            //i.dom.height = i.clip.height;
+            i.dom.width = i.clip.width;
+            i.dom.height = i.clip.height;
           }
         });
 
@@ -406,8 +410,8 @@
         var container = l.dom.parentNode;
         if (!t.dom) t.dom=document.createElement('div')
         if (t.dom.parentNode != container) container.appendChild(t.dom);
-        t.dom.style.left = t.containingQuads[0][0]+l.offsetToTransformParent[0]+'px';
-        t.dom.style.top = t.containingQuads[0][1]+l.offsetToTransformParent[1]+'px';
+        t.dom.style.left = t.containingQuads[0][0]+'px';
+        t.dom.style.top = t.containingQuads[0][1]+'px';
         t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
         t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
         t.dom.onclick = this.targetClick.bind(this);
@@ -545,7 +549,7 @@
       resize() {
         this.ws.req('Emulation.setDeviceMetricsOverride', {
           height: window.innerHeight,
-          width: Math.floor(window.innerWidth*0.9),
+          width: Math.floor(window.innerWidth*(options.fullscreen?1.0:0.9)),
           deviceScaleFactor: window.devicePixelRatio,
           mobile: true
         }); 
@@ -618,6 +622,8 @@
         var newElem = document.createElement('bb-session');
         document.getElementById('recreation').appendChild(newElem);
 
+        if (options.fullscreen) newElem.classList.add('fullscreen');
+
         var ws = new devToolsWebsocketWrapper(socket, sessionId);
         
         var sess = new Session(ws, newElem, existingSession);
@@ -645,7 +651,7 @@
         sessionActivate(msg.sessionId);
 
         sess.ws.req('Page.navigate', {url: currentURL()});
-        sess.ws.req('Page.enable');
+        sess.ws.req('Page.enable', {targetBandwidth: 999999999});
         sess.ws.req('PageStream.enable', {fps: 0});
 
         resize();

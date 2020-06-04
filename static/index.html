@@ -90,7 +90,7 @@
       // Don't display previews of future windows
       fullscreen: false,
     }
-    BBOptionsOverrides && Object.assign(options, BBOptionsOverrides)
+    typeof BBOptionsOverrides !== 'undefined' && Object.assign(options, BBOptionsOverrides)
 
     // Implements the chrome devtools protocol on top of a websocket.
     class devToolsWebsocket extends WebSocket {
@@ -572,10 +572,10 @@
       
       socket = await wsPromise;
 
-      window.socket = socket;  // for testing
-
       var sessions = {};
       var activeSession;
+
+      window.sessions = sessions;  // for testing
 
       // All these are run serially on startup, but none depend on a
       // response from a request.  The intention is a server can fire
@@ -650,11 +650,10 @@
         var sess = addSession(socket,  msg.sessionId, null);
         sessionActivate(msg.sessionId);
 
+        sess.resize();
+        sess.ws.req('Page.enable', {});
+        sess.ws.req('PageStream.enable', {fps: 0, targetBandwidth: 999999999});
         sess.ws.req('Page.navigate', {url: currentURL()});
-        sess.ws.req('Page.enable', {targetBandwidth: 999999999});
-        sess.ws.req('PageStream.enable', {fps: 0});
-
-        resize();
       };
 
       socket.eventListeners['Target.detachedFromTarget'] = msg => {

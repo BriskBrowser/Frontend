@@ -396,13 +396,22 @@
 
       }
 
-      targetClick(evt) {
-        if (evt.currentTarget.metadata.sessionId) {
-          // Means we have preloaded this click - we just need to transfer to that session.
-          this.onSessionActivate(evt.currentTarget.metadata.sessionId);
+      targetTouch(type, evt) {
+        // We want to detect 'click' events, but have to use touch instead because
+        // we'll need to cancel the global touch event touch if we detect a click, and the onclick() event
+        // fires too late to do that.
+        if (type=='touchStart' && evt.touches.length==1) {
+          evt.currentTarget.metadata.touchStarted = true;
+        } else if (type=='touchEnd' && evt.currentTarget.metadata.touchStarted) {
+          if (evt.currentTarget.metadata.sessionId) {
+            // Means we have preloaded this click - we just need to transfer to that session.
+            this.onSessionActivate(evt.currentTarget.metadata.sessionId);
+          }
+          this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
+          evt.cancel = true;
+        } else {
+          delete evt.currentTarget.metadata.touchStarted;
         }
-        this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
-        evt.stopPropagation();
       }
 
       createTargetNode(t, l) {
@@ -414,7 +423,10 @@
         t.dom.style.top = t.containingQuads[0][1]+'px';
         t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
         t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
-        t.dom.onclick = this.targetClick.bind(this);
+
+        ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+          t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
+
         t.dom.metadata = t;
         t.dom.classList.add('link');
         t.dom.classList.toggle('alive', !!t.sessionId);
@@ -556,6 +568,9 @@
       }
 
       touch(n, e){
+        if (e.cancel) {
+          n = 'touchCancel';
+        }
         this.ws.req('Input.dispatchTouchEvent', {
           type: n,
           touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),

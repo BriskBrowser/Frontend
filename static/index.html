@@ -4,26 +4,22 @@
   <meta name="viewport" content="width=device-width, user-scalable=no">
   <style>
     bb-session.old-active {
-      top: 0px !important;
-      transform: scale(1);
+      transform: inherit;
       filter: brightness(50%);
-      right: 0px;
       z-index: 0;
     }
     bb-session.active {
-      top: 0px !important;
-      transform: scale(1);
-      right: 0px;
+      transform: inherit;
       z-index: 1;
       display: block;
     }
     bb-session {
+      --height: 0px;
       position: fixed;
       /* display: none; */
       transition: all 0.2s;
       /* overflow: auto; */
-      right: -10%;
-      transform: scale(0.2);
+      transform: translateY(var(--height)) scale(0.2) translateX(50%);
       transform-origin: top right;
       width: 100%;
       top: 0px;
@@ -32,8 +28,7 @@
 
     bb-session.fullscreen:not(.active){
       /* Push inactive sessions completely offscreen */
-      right: -20%;
-      transition: none;
+      display: none;
     }
 
     .link {
@@ -46,7 +41,7 @@
     }
 
     .link.alive {
-      border: 0.5px solid rgba(0,2555,0,0.4);
+      border: 0.5px solid rgba(0,255,0,0.4);
     }
 
     .t {
@@ -76,7 +71,7 @@
       //  * Otherwise, connect to document.location.host
 
       //websocketServer: 'wss://server.example.com/',
-      websocketServer: 'ws://localhost:12159',
+      //websocketServer: 'ws://localhost:12159',
     
       // It's a dns based pool with a custom load balancing algorithm.
       // servers are expected to register at n.serverpool.com, where n is an integer from 0 to ~ the pool
@@ -252,7 +247,7 @@
         };
         
         this.ws.eventListeners['PageStream.frameDone'] = () => {
-          this.updateScreen();
+          this.scheduleUpdateScreen();
         };
 
         ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
@@ -283,7 +278,13 @@
             if (adopt.adoptable) {
               t.dom = adopt
             }
-          this.createDOMTransformNode(t.parent_id, zIndex, t.dom && t.dom.parentNode);
+
+          var oldZIndex = t.zIndex || -1;
+          
+          if (oldZIndex < zIndex || !t.dom || t.dom.adoptable) {
+            t.zIndex = Math.max(zIndex, oldZIndex);
+            this.createDOMTransformNode(t.parent_id, zIndex, t.dom && t.dom.parentNode);
+          }
 
           if (!t.dom) {
             t.dom = document.createElement('div');
@@ -296,9 +297,8 @@
           }
           t.dom.classList.add('t');
           t.dom.setAttribute('t'+t.id, '');
-          //this.sessionState.proptrees.clip_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('c' + x.id, ''));
-          //this.sessionState.proptrees.scroll_tree.nodes.filter(x => x.transform_id === t).forEach(x => t.dom.setAttribute('s' + x.id, ''));
-          t.dom.style.zIndex = t.dom.style.zIndex?Math.max(zIndex, t.dom.style.zIndex):zIndex;
+          if (oldZIndex != t.zIndex)
+            t.dom.style.zIndex = t.zIndex;
 
           if (t.clip) {
             t.dom.style.width = t.clip.clip[2] + 'px';
@@ -314,8 +314,9 @@
           }
           
           if (t.scroll && this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
-            t.dom.scrollTop = t.scroll_offset[1];
-            t.dom.scrollLeft = t.scroll_offset[0];
+            // Perf bottleneck - server side scrolling disabled
+            //t.dom.scrollTop = t.scroll_offset[1];
+            //t.dom.scrollLeft = t.scroll_offset[0];
           }
           t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
           t.dom.classList.toggle('scroll', !!t.scroll)
@@ -417,16 +418,18 @@
       createTargetNode(t, l) {
         if (!t.containingQuads) return;
         var container = l.dom.parentNode;
-        if (!t.dom) t.dom=document.createElement('div')
+        if (!t.dom) {
+          t.dom=document.createElement('div');
+          ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+            t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
+        }
         if (t.dom.parentNode != container) container.appendChild(t.dom);
         t.dom.style.left = t.containingQuads[0][0]+'px';
         t.dom.style.top = t.containingQuads[0][1]+'px';
         t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
         t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
 
-        ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
-          t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
-
+        
         t.dom.metadata = t;
         t.dom.classList.add('link');
         t.dom.classList.toggle('alive', !!t.sessionId);
@@ -478,6 +481,10 @@
         
         this.sessionState = {...this.sessionState, clip_tree, effect_tree, scroll_tree, transform_tree, layer_tree};
 
+      }
+      scheduleUpdateScreen() {
+        if (this.requestAnimationFrameCallback) cancelAnimationFrame(this.requestAnimationFrameCallback);
+        this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
       }
       updateScreen() {
         // apply layerupdates
@@ -532,11 +539,10 @@
 
         this.sessionState.nextLayerUpdates = [];
 
-        // Mark all transform nodes as adoptable and set them back to no zindex
+        // Mark all transform nodes as adoptable
         var old_transform_tree = this.sessionState.transform_tree;
         if (old_transform_tree) old_transform_tree.forEach(t => {
           if (t.dom && t.parent_id) {
-            t.dom.style.zIndex=0;
             t.dom.adoptable=true
           }
 
@@ -610,7 +616,7 @@
         eligibleSessions.sort((a,b) => ca[a] - ca[b]);
 
         eligibleSessions.forEach((x, index)=> {
-          sessions[x].domElement.style.top = (index/(eligibleSessions.length)*100) + '%';
+          sessions[x].domElement.style.setProperty("--height", (index/(eligibleSessions.length)*100) + 'vh');
         });
       }
 

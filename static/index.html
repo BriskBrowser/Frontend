@@ -244,6 +244,7 @@
 
         this.ws.eventListeners['PageStream.streamPropTrees'] =  params => {
           this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
+          this.fullUpdateRequired = true;
         };
         
         this.ws.eventListeners['PageStream.frameDone'] = () => {
@@ -344,8 +345,21 @@
         this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
         this.updateTargetHeights();
       }
+      createDOMLayerImages(l) {
+        l.images && l.images.forEach(i => {
+          if (!i.dom) {
+            i.dom = document.createElement('img');
+            l.dom.appendChild(i.dom);
+            i.dom.src=i.image;
+            i.dom.style.position = 'absolute';
+            i.dom.style.top = i.clip.y + 'px';
+            i.dom.style.left = i.clip.x + 'px';
+            i.dom.width = i.clip.width;
+            i.dom.height = i.clip.height;
+          }
+        });
+      }
       createDOMLayerNode(l) {
-
         if (!l.images || l.name == 'Frame Overlay Content Layer') return;
 
         // Huh - looks like a scrollingcontents layer.  If so, set everything up appropriately
@@ -368,18 +382,7 @@
           l.transform_tree_index.dom.appendChild(l.dom);
         }
         
-        l.images && l.images.forEach(i => {
-          if (!i.dom) {
-            i.dom = document.createElement('img');
-            l.dom.appendChild(i.dom);
-            i.dom.src=i.image;
-            i.dom.style.position = 'absolute';
-            i.dom.style.top = i.clip.y + 'px';
-            i.dom.style.left = i.clip.x + 'px';
-            i.dom.width = i.clip.width;
-            i.dom.height = i.clip.height;
-          }
-        });
+        this.createDOMLayerImages(l);
 
         l.dom.style.top = l.offsetToTransformParent[1] + 'px';
         l.dom.style.left = l.offsetToTransformParent[0]+ 'px';
@@ -453,7 +456,8 @@
         var layer_tree = this.sessionState.layer_tree;
 
         function get_tree_node(a) {
-          if (Number.isInteger(a) || a === undefined) return a;
+          if (Number.isInteger(a)) return a;
+          if (a === undefined) return a;
           return a.id;
         }
         layer_tree.forEach(l => {
@@ -487,9 +491,12 @@
         this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
       }
       updateScreen() {
-        // apply layerupdates
         this.sessionState.nextLayerUpdates.forEach(params => {
           var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || { targets: {}};
+
+          if (params.layerDeleted || params.layerInfo || params.zIndex || params.targets) {
+            this.fullUpdateRequired = true;
+          }
 
           if (params.layerDeleted) {
             l.dom && l.dom.remove();
@@ -549,11 +556,17 @@
         });
 
         // apply proptrees
-        this.makeTrees(this.sessionState.nextProptrees);
+        if (this.sessionState.nextProptrees || this.fullUpdateRequired) {
+          this.makeTrees(this.sessionState.nextProptrees);
+          this.fullUpdateRequired = true
+        }
         
         // Create or adopt all layers, (and by extension scrolls, clips, transforms and targets)
         this.sessionState.layer_tree.forEach(l => {
-          this.createDOMLayerNode(l);
+          if (this.fullUpdateRequired)
+            this.createDOMLayerNode(l);
+          else
+            this.createDOMLayerImages(l);
         });
 
         // remove unowned transform nodes

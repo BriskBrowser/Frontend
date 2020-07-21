@@ -79,8 +79,8 @@
       // take them down (should only happen >10k servers).
       // The client will connect to 10 hosts logarithmicly spaced, 
       // and use whichever has the lowest published load scaled by response time.
-      // fastbrowser.omattos.com is provided without any SLA.  Expect to be blocked if you apply too much load.
-      //websocketPool: 'fastbrowser.omattos.com',
+      // briskbrowser.omattos.com is provided without any SLA.  Expect to be blocked if you apply too much load.
+      //websocketPool: 'briskbrowser.omattos.com',
 
       // Don't display previews of future windows
       fullscreen: false,
@@ -216,22 +216,17 @@
     }
 
     class Session {
-      constructor(ws, domElement, baseSession) {
-        this.sessionState = {preventscroll: 0, nextLayerUpdates: [], layer_tree: []};
+      // domElement can be null, in which case this session will be initialised when its set with 
+      constructor(ws, baseSession) {
+        this.sessionState = {preventscroll: 0, nextLayerUpdates: [], comittedLayerUpdates: [], layer_tree: []};
 
         this.ws = ws;
-        this.domElement = domElement;
         this.onNewSession = () => {};
         this.onSessionActivate = () => {};
         this.onSessionSetHeight = () => {};
 
         if (baseSession) {
           this.sessionState = deepClone(baseSession.sessionState);
-
-          // Create dom nodes for everything.
-          this.sessionState.layer_tree.forEach(l => {
-            this.createDOMLayerNode(l);
-          });
         }
 
         this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
@@ -248,12 +243,27 @@
         };
         
         this.ws.eventListeners['PageStream.frameDone'] = () => {
+          this.sessionState.comittedLayerUpdates = this.sessionState.comittedLayerUpdates.concat(this.sessionState.nextLayerUpdates);
+          this.sessionState.nextLayerUpdates = [];
+          if (this.sessionState.nextProptrees) {
+            this.sessionState.comittedProptrees = this.sessionState.nextProptrees;
+            delete this.sessionState.nextProptrees;
+          }
           this.scheduleUpdateScreen();
         };
 
-        ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
-          this.domElement.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
+      }
 
+      // Element ele is adopted by this Session.  It will be removed if a new element is bound.
+      set domElement(ele) {
+        // get rid of old element
+        this.domElement_ &&  this.domElement_.remove();
+
+        this.domElement_ = ele;
+        ele && ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+            ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
+
+        this.updateScreen();
       }
 
       decodeLayerInfo(l) {
@@ -324,7 +334,7 @@
 
         } else {
           // Root transform is the one given when the class was constructed
-          t.dom = this.domElement
+          t.dom = this.domElement_;
         }
       }
 
@@ -491,7 +501,7 @@
         this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
       }
       updateScreen() {
-        this.sessionState.nextLayerUpdates.forEach(params => {
+        this.sessionState.comittedLayerUpdates.forEach(params => {
           var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || { targets: {}};
 
           if (params.layerDeleted || params.layerInfo || params.zIndex || params.targets) {
@@ -544,7 +554,9 @@
           };
         });
 
-        this.sessionState.nextLayerUpdates = [];
+        this.sessionState.comittedLayerUpdates = [];
+
+        if (!this.domElement_) return;
 
         // Mark all transform nodes as adoptable
         var old_transform_tree = this.sessionState.transform_tree;
@@ -556,9 +568,8 @@
         });
 
         // apply proptrees
-        if (this.sessionState.nextProptrees || this.fullUpdateRequired) {
-          this.makeTrees(this.sessionState.nextProptrees);
-          this.fullUpdateRequired = true
+        if (this.sessionState.comittedProptrees && this.fullUpdateRequired) {
+          this.makeTrees(this.sessionState.comittedProptrees);
         }
         
         // Create or adopt all layers, (and by extension scrolls, clips, transforms and targets)
@@ -580,7 +591,7 @@
       resize() {
         this.ws.req('Emulation.setDeviceMetricsOverride', {
           height: window.innerHeight,
-          width: Math.floor(window.innerWidth*(options.fullscreen?1.0:0.9)),
+          width: Math.floor(window.innerWidth),
           deviceScaleFactor: window.devicePixelRatio,
           mobile: true
         }); 
@@ -598,7 +609,7 @@
 
       destroy() {
         this.ws.destroy();
-        this.domElement.parentNode.removeChild(this.domElement);
+        this.domElement = null;
       }
     }
         
@@ -608,6 +619,10 @@
 
       var sessions = {};
       var activeSession;
+
+      if (!window.navigator.userAgent.match(/Chrome\/[.0-9]* Mobile/)) {
+        alert("Hold Up!  We only support Chrome Mobile right now...   Click OK to try anyway...   But it probably won't work :-(")
+      }
 
       window.sessions = sessions;  // for testing
 
@@ -623,13 +638,14 @@
       };
 
       function arrangeSessions() {
+        return;
         var ca = sessions[activeSession].childArrangement;
         if (!ca) return;
         var eligibleSessions = Object.keys(ca).filter(x => x in sessions);
         eligibleSessions.sort((a,b) => ca[a] - ca[b]);
 
         eligibleSessions.forEach((x, index)=> {
-          sessions[x].domElement.style.setProperty("--height", (index/(eligibleSessions.length)*100) + 'vh');
+          sessions[x].domElement_.style.setProperty("--height", (index/(eligibleSessions.length)*100) + 'vh');
         });
       }
 
@@ -640,11 +656,18 @@
       }
 
       function sessionActivate(sessionId) {
-        Object.keys(sessions).forEach((sid) => {
-          var cl = sessions[sid].domElement.classList;
-          cl.replace('active', 'old-active');
-          cl.toggle('active', sid==sessionId);
-        });
+    /*    Object.keys(sessions).forEach((sid) => {
+          //var cl = sessions[sid].domElement_.classList;
+          //cl.replace('active', 'old-active');
+          //cl.toggle('active', sid==sessionId);
+          sessions[sid].domElement = null;
+        }); */
+        var elem = document.createElement('bb-session');
+        document.querySelector('#recreation').appendChild(elem);
+        elem.classList.add('active');
+        activeSession && (sessions[activeSession].domElement = null);
+        sessions[sessionId].domElement = elem;
+
         activeSession = sessionId;
         arrangeSessions();
       }
@@ -653,16 +676,13 @@
       function addSession(socket, sessionId, existingSession) {
         if (sessions[sessionId]) return;
         
-        var newElem = document.createElement('bb-session');
-        document.getElementById('recreation').appendChild(newElem);
-
-        if (options.fullscreen) newElem.classList.add('fullscreen');
-
+        
         var ws = new devToolsWebsocketWrapper(socket, sessionId);
         
-        var sess = new Session(ws, newElem, existingSession);
+        var sess = new Session(ws, existingSession);
         sessions[sessionId] = sess;
 
+        
         // Event emitted whenever this session wants to trigger the creation of a clone of itself.
         sess.onNewSession = addSession;
 
@@ -708,30 +728,17 @@
       };
 
       var resize = () => {
-        Object.values(sessions).forEach(x=> x.resize());
+        Object.values(sessions).forEach(x => x.resize());
       }
       window.addEventListener('resize', resize);
       
     });
 
   </script>
-  <!-- <script async src="https://securepubads.g.doubleclick.net/tag/js/gpt.js"></script> -->
-  <script>
-    window.googletag = window.googletag || {cmd: []};
-    googletag.cmd.push(function() {
-      googletag.defineSlot('/21912372412/test2', [[300, 50], [88, 31], [320, 100], [320, 50], 'fluid', [220, 90], [300, 31], [300, 75], [468, 60], [300, 100]], 'div-gpt-ad-1580941460580-0').addService(googletag.pubads());
-      googletag.pubads().enableSingleRequest();
-      googletag.enableServices();
-    });
-  </script>
 </head>
 <body style='margin:0px'>
-  <div id='recreation'></div>
-  <div id='div-gpt-ad-1580941460580-0'>
-    <script>
-      googletag.cmd.push(function() { googletag.display('div-gpt-ad-1580941460580-0'); });
-    </script>
+  <div id='recreation'>
   </div>
-  <a href="https://omattos.com/">See content</a>
+  Something seems to have gone wrong with the Brisk Browser...   How about <a href='https://github.com/BriskBrowser/Frontend/blob/master/docs/contributing.md'>helping us</a> fix it?
 </body>
 </html>

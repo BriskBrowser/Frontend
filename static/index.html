@@ -621,7 +621,7 @@
       var activeSession;
 
       if (!window.navigator.userAgent.match(/Chrome\/[.0-9]* Mobile/)) {
-        alert("Hold Up!  We only support Chrome Mobile right now...   Click OK to try anyway...   But it probably won't work :-(")
+        alert("Hold Up!  We only support Android Chrome right now...   Click OK to try anyway...   But it probably won't work :-(")
       }
 
       window.sessions = sessions;  // for testing
@@ -632,8 +632,9 @@
       // connects to speed up initial loading.
       socket.req(undefined, 'Target.setDiscoverTargets', {discover: true});
       socket.eventListeners['Target.targetCreated'] = msg => {
-        if (msg.targetInfo.type=='page') {
+        if (msg.targetInfo.type=='page' && !this.attached) {
           socket.req(undefined, 'Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
+          this.attached = true;
         }
       };
 

@@ -2,7 +2,7 @@
 
 This repo contains the frontend to BriskBrowser.  The backend is located [here](https://github.com/BriskBrowser/chromium).
 
-A hosted version is available [here](https://briskbrowser.omattos.com).  (Note:  Must use Android mobile browser or Chrome devtools emulation, Uptime: 50% or so during UK working hours, down the rest of the time...)
+A hosted version is available [here](https://briskbrowser.com).  (Note:  Must use Android mobile browser or Chrome devtools emulation, Uptime: 50% or so during UK working hours, down the rest of the time...)
 
 ## Project Goals
 

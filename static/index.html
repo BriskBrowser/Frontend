@@ -204,8 +204,10 @@
     function deepClone(obj, hash = new WeakMap()) {
         // Do not try to clone primitives or functions
         if (Object(obj) !== obj) return obj;
-        if (obj instanceof Function || obj instanceof HTMLElement)
+        if (obj instanceof Function)
           return undefined;
+        if (obj instanceof HTMLElement)
+          return obj.sharable?obj:undefined;
         if (hash.has(obj)) return hash.get(obj); // Cyclic reference
         var result = new obj.constructor();
         // Register in hash    
@@ -357,15 +359,15 @@
       }
       createDOMLayerImages(l) {
         l.images && l.images.forEach(i => {
-          if (!i.dom) {
-            i.dom = document.createElement('img');
+          if (i.dom.activeInLayer != l) {
+            // TODO:  i.dom is shared with other sessions - implement some kind of refcounting & duplication here.
             l.dom.appendChild(i.dom);
-            i.dom.src=i.image;
             i.dom.style.position = 'absolute';
             i.dom.style.top = i.clip.y + 'px';
             i.dom.style.left = i.clip.x + 'px';
             i.dom.width = i.clip.width;
             i.dom.height = i.clip.height;
+            i.dom.activeInLayer = l;
           }
         });
       }
@@ -532,11 +534,19 @@
                   l.images[i].clip.y >= bufUpdate.clip.y &&
                   l.images[i].clip.x + l.images[i].clip.width <= bufUpdate.clip.x + bufUpdate.clip.width &&
                   l.images[i].clip.y + l.images[i].clip.height <= bufUpdate.clip.y + bufUpdate.clip.height) {
-                l.images[i].dom && l.images[i].dom.remove();
+                l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
                 l.images.splice(i, 1);
                 }
               }
-              l.images.push({image: bufUpdate.image, clip: bufUpdate.clip });
+              var domImage;
+              if (bufUpdate.image) {
+                domImage = new Image();
+                domImage.src = bufUpdate.image;
+                domImage.decode();
+                // Indicates this HTMLElement can be referenced from multiple sessions.
+                domImage.sharable = true;
+              }
+              l.images.push({clip: bufUpdate.clip, dom: domImage});
             });
           }
 

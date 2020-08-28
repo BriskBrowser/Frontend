@@ -254,6 +254,13 @@
           this.scheduleUpdateScreen();
         };
 
+        this.ws.eventListeners['PageStream.setKeyboardState'] = params => {
+          if (this.keyboard) {
+            if (params.showing) this.keyboard.focus();
+            else this.keyboard.blur();
+          }
+        }
+
       }
 
       // Element ele is adopted by this Session.  It will be removed if a new element is bound.
@@ -262,8 +269,17 @@
         this.domElement_ &&  this.domElement_.remove();
 
         this.domElement_ = ele;
-        ele && ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+        if (ele) {
+          ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
             ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
+
+          this.keyboard = document.createElement('div');
+          this.keyboard.contentEditable = true;
+          this.keyboard.style.display = 'none';
+
+          ele.appendChild(this.keyboard);
+        }
+
 
         this.updateScreen();
       }
@@ -398,8 +414,8 @@
 
         l.dom.style.top = l.offsetToTransformParent[1] + 'px';
         l.dom.style.left = l.offsetToTransformParent[0]+ 'px';
-        l.dom.width=l.bounds[0];
-        l.dom.height=l.bounds[1];
+        l.dom.style.width=l.bounds[0] + 'px';
+        l.dom.style.height=l.bounds[1] + 'px';
         l.dom.style.position = 'absolute';
         l.dom.style.zIndex = l.zIndex;
         l.dom.setAttribute('l'+l.layerId, l.name);

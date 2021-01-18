@@ -16,9 +16,9 @@ If you can write C++ or Javascript, your expertise will help!  We even offer [re
 
 ### Frontend
 
-The [Frontend](../static/index.html) runs in a regular browser, and it's job is to display any pre-rendered webpage.  It receives data from the backend about what to render where, and how interactions like scrolling should be done.  The cardinal rule is any action from the user, like taps, swipes, or pinches should not wait for a network round trip - the backend (server) will send enough information to allow all those to happen entirely locally.
+The [Frontend](../src/index.html) runs in a regular browser, and it's job is to display any pre-rendered webpage.  It receives data from the backend about what to render where, and how interactions like scrolling should be done.  The cardinal rule is any action from the user, like taps, swipes, or pinches should not wait for a network round trip - the backend (server) will send enough information to allow all those to happen entirely locally.
 
-The frontend today is a single html file (and we want to keep it small and light for fast loading, and simple "copy this onto a server" hosting).  It's far from perfect though - there are lots of useful things one could add - perhaps start with a list of [beginner issues](https://github.com/BriskBrowser/Frontend/labels/good%20first%20issue).
+The frontend is optionally compiled to a single html file for deployment, or you can just copy the whole "src" directory straight to a webserver.  It's far from perfect - there are lots of useful things one could add - perhaps start with a list of [beginner issues](https://github.com/BriskBrowser/Frontend/labels/good%20first%20issue).
 
 
 ### Backend

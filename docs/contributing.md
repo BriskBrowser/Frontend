@@ -8,7 +8,7 @@ Get news of Brisk Browser out there to friends and family - particularly to thos
 
 ## Donations
 
-If you can contribute financially, we will use it to add to the reward fund to encourage other people to help us achieve our goal of saving millions of human hours quicer.  Contact Project maintainer @Hello1024.
+If you can contribute financially, we will use it to add to the reward fund to encourage other people to help us achieve our goal of saving millions of human hours quicker.  Contact Project maintainer @Hello1024.
 
 ## Writing Code
 

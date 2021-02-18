@@ -229,7 +229,7 @@ export class Session {
     this.createDOMLayerImages(l);
 
     l.dom.style.top = l.offsetToTransformParent[1] + 'px';
-    l.dom.style.left = l.offsetToTransformParent[0]+ 'px';
+    l.dom.style.left = l.offsetToTransformParent[0] + 'px';
     l.dom.style.width=l.bounds[0] + 'px';
     l.dom.style.height=l.bounds[1] + 'px';
     l.dom.style.overflow = 'hidden';

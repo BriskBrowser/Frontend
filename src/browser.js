@@ -105,7 +105,7 @@ export class Browser {
       sessions[sid].domElement = null;
     }); */
     var elem = document.createElement('bb-session');
-    document.querySelector('#recreation').appendChild(elem);
+    this.rootElement.appendChild(elem);
     elem.classList.add('active');
     this.activeSession && (this.sessions[this.activeSession].domElement = null);
     this.sessions[sessionId].domElement = elem;

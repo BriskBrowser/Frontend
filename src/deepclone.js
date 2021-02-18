@@ -3,9 +3,9 @@ export function deepClone(obj, hash = new WeakMap()) {
     if (Object(obj) !== obj) return obj;
     if (obj instanceof Function)
       return undefined;
+    if (hash.has(obj)) return hash.get(obj); // Cyclic reference
     if (obj instanceof HTMLElement)
       return obj.sharable?obj:undefined;
-    if (hash.has(obj)) return hash.get(obj); // Cyclic reference
     var result = new obj.constructor();
     // Register in hash    
     hash.set(obj, result);

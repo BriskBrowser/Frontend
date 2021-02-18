@@ -29,7 +29,7 @@ typeof BBOptionsOverrides !== 'undefined' && Object.assign(options, BBOptionsOve
 import {Browser} from './browser.js'
     
 window.addEventListener('DOMContentLoaded', async (event) => {
-  let b = new Browser(document.querySelector('#recreation'), options)
+  let b = new Browser(document.querySelector('#browser'), options)
 
   b.init();
 });

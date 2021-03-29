@@ -2,4 +2,4 @@ puppeteer_dev_profile*
 node_modules
 npm-debug.log
 package-lock.json
-
+dist

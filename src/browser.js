@@ -41,7 +41,9 @@ export class Browser {
       var sess = this.addSession(msg.sessionId, null);
       this.sessionActivate(msg.sessionId);
 
-      sess.resize();
+      let dims = this.rootElement.getBoundingClientRect();
+      sess.resize(dims.width, dims.height, window.devicePixelRatio);
+
       sess.ws.req('Page.enable', {});
       sess.ws.req('PageStream.enable', {fps: 0, targetBandwidth: 999999999});
       sess.ws.req('Page.navigate', {url: this.currentURL()});
@@ -66,7 +68,8 @@ export class Browser {
 
 
     var resize = () => {
-      Object.values(this.sessions).forEach(x => x.resize());
+      let dims = this.rootElement.getBoundingClientRect();
+      Object.values(this.sessions).forEach(x => x.resize(dims.width, dims.height, window.devicePixelRatio));
     }
     window.addEventListener('resize', resize);
   }

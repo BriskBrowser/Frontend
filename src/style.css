@@ -16,8 +16,6 @@ bb-session {
   /* overflow: auto; */
   transform: translateY(var(--height)) scale(0.2) translateX(50%);
   transform-origin: top right;
-  width: 100%;
-  top: 0px;
   z-index: 2;
 }
 
@@ -46,6 +44,10 @@ bb-session.fullscreen:not(.active){
 
 .scroll {
   overflow: scroll;
+}
+
+.keyboard {
+  width: 0px; height: 0px; position: absolute; z-index: -999; opacity: 0;";
 }
 
 ::-webkit-scrollbar {

@@ -63,7 +63,7 @@ export class Session {
         ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
 
       this.keyboard = document.createElement('textarea');
-      this.keyboard.style = "width: 0px; height: 0px; position: absolute; z-index: -999";
+      this.keyboard.className = "keyboard";
       this.keyboard.oninput = this.keyboardHandler.bind(this);
       this.keyboardUpdateBlockedCtr = 0;
 
@@ -249,17 +249,19 @@ export class Session {
     // We want to detect 'click' events, but have to use touch instead because
     // we'll need to cancel the global touch event touch if we detect a click, and the onclick() event
     // fires too late to do that.
-    if (type=='touchStart' && evt.touches.length==1) {
+    if (type=='pointerdown' && evt.isPrimary) {
+      evt.currentTarget.setPointerCapture(evt.pointerId)
       evt.currentTarget.metadata.touchStarted = true;
-    } else if (type=='touchEnd' && evt.currentTarget.metadata.touchStarted) {
+    } else if (type=='pointerup' && evt.currentTarget.metadata.touchStarted) {
       if (evt.currentTarget.metadata.sessionId) {
         // Means we have preloaded this click - we just need to transfer to that session.
         this.onSessionActivate(evt.currentTarget.metadata.sessionId);
       }
       this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
-      evt.cancel = true;
+      evt.preventDefault();
     } else {
       delete evt.currentTarget.metadata.touchStarted;
+      evt.currentTarget.releasePointerCapture(evt.pointerId) 
     }
   }
 
@@ -268,8 +270,8 @@ export class Session {
     var container = l.dom.parentNode;
     if (!t.dom) {
       t.dom=document.createElement('div');
-      ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
-        t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
+      ['pointerdown', 'pointerup', 'pointercancel', 'pointermove'].forEach(evt =>
+        t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt)));
     }
     if (t.dom.parentNode != container) container.appendChild(t.dom);
     t.dom.style.left = t.containingQuads[0][0]+'px';
@@ -431,11 +433,11 @@ export class Session {
     this.updateTargetHeights();
   }
 
-  resize() {
+  resize(width, height, dpr) {
     this.ws.req('Emulation.setDeviceMetricsOverride', {
-      height: window.innerHeight,
-      width: Math.floor(window.innerWidth),
-      deviceScaleFactor: window.devicePixelRatio,
+      height: Math.floor(height),
+      width: Math.floor(width),
+      deviceScaleFactor: dpr,
       mobile: true
     }); 
   }

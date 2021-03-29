@@ -39,6 +39,7 @@ module.exports = {
         inlineSource: '.(js|css)$'
       }),
       new HtmlWebpackInlineSourcePlugin(HtmlWebpackPlugin)
-    ]  
+    ],
+    mode: 'production',
 
 }

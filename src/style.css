@@ -47,7 +47,7 @@ bb-session.fullscreen:not(.active){
 }
 
 .keyboard {
-  width: 0px; height: 0px; position: absolute; z-index: -999; opacity: 0;";
+  width: 0px; height: 0px; position: absolute; z-index: -999; opacity: 0;
 }
 
 ::-webkit-scrollbar {

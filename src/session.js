@@ -1,9 +1,19 @@
 import {deepClone} from './deepclone.js'
 
+// Session-global cache of tile bytes by content id (server-computed hash of
+// the tile's pixels), shared across every layer and every Session in this
+// tab -- including a session promoted from a speculative fork, which is
+// exactly the case this exists for. The server omits `image` from a
+// BufferUpdate whenever it believes this client already holds the bytes for
+// `tileId` (a resize/split/repeated motif/navigation/promoted fork reusing
+// content already sent); this cache is where those bytes actually live so
+// they can be reused instead of re-fetched. See docs/tile-transport.md.
+const tileStore = new Map();
 
 export class Session {
   // domElement can be null, in which case this session will be initialised when its set with the setter.
-  constructor(ws, baseSession) {
+  constructor(ws, baseSession, options) {
+    this.options = options || {};
     this.sessionState = {
       preventscroll: 0,
       nextLayerUpdates: [],
@@ -116,6 +126,41 @@ export class Session {
     return res
   }
 
+  // Border-radius on an overflow:hidden/auto element is a paint-time detail
+  // for static content -- Skia bakes the rounded clip directly into the
+  // rastered tile pixels server-side, so a plain rectangular reconstruction
+  // displays it correctly with no extra client-side work. But a *scrolled*
+  // clip frame (the '.scroll' div created above for a scroll container) is
+  // reconstructed as its own DOM box precisely so it can move/clip content
+  // independently of any raster tile -- so its corners need rounding too,
+  // or they render as hard right angles regardless of the source page's
+  // CSS. cc doesn't carry corner radii on the clip tree at all; they live
+  // on whichever effect-tree node shares this clip's id
+  // (EffectNode::rounded_corner_bounds, a [x,y,w,h, rx,ry x4] RRectF in
+  // SkRRect's standard UL/UR/LR/LL corner order -- conveniently the same
+  // order CSS's border-radius shorthand uses).
+  roundedCornerCssFor(clipNode) {
+    var effectNodes = this.sessionState.effect_tree || [];
+    for (var i = 0; i < effectNodes.length; i++) {
+      var e = effectNodes[i];
+      var rcb = e && e.rounded_corner_bounds;
+      if (!rcb || rcb.length < 12 || !e.clip_id) continue;
+      // Match by geometry (same rect, same local transform space), not
+      // object identity -- cc can emit a separate-but-coincident clip node
+      // for the effect vs. the one a scroll/overflow frame's own clip_id
+      // references, even when they describe the same rounded region.
+      if (e.transform_id !== clipNode.transform_id) continue;
+      var c = clipNode.clip, b = rcb;
+      if (c[0] !== b[0] || c[1] !== b[1] || c[2] !== b[2] || c[3] !== b[3]) continue;
+      var rx = [rcb[4], rcb[6], rcb[8], rcb[10]];
+      var ry = [rcb[5], rcb[7], rcb[9], rcb[11]];
+      if (rx.some(v => v)) {
+        return rx.join('px ') + 'px / ' + ry.join('px ') + 'px';
+      }
+    }
+    return '';
+  }
+
   createDOMTransformNode(t, zIndex, adopt) {
     if (t.parent_id) {
       if (!t.dom && adopt)
@@ -150,19 +195,11 @@ export class Session {
         t.dom.style.height = t.clip.clip[3] + 'px';
         t.dom.style.top = t.clip.clip[1] + 'px';
         t.dom.style.left = t.clip.clip[0] + 'px';
-        if (t.clip.clip[0] || t.clip.clip[1])
-          t.dom.style.transform = `matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, ${t.clip.clip[0]},${t.clip.clip[1]},0,1) ` + this.toCss(t.local);
-        else
-          t.dom.style.transform = this.toCss(t.local);
-      } else {
-        t.dom.style.transform = this.toCss(t.local);
+        t.dom.style.borderRadius = this.roundedCornerCssFor(t.clip);
       }
-      
-      if (t.scroll && this.sessionState.preventscrollElem != t.scroll.element_id.id_) {
-        // Perf bottleneck - server side scrolling disabled
-        //t.dom.scrollTop = t.scroll_offset[1];
-        //t.dom.scrollLeft = t.scroll_offset[0];
-      }
+      t.dom.style.transform = this.toCss(t.local, t.origin, t.post_translation);
+
+      if (t.scroll) this.applyServerScroll(t);
       t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
       t.dom.classList.toggle('scroll', !!t.scroll)
 
@@ -183,11 +220,80 @@ export class Session {
   }
 
   scrollHandler(t, evt) {
+    // Distinguishes a real (touch-driven) scroll from the echo fired by
+    // applyServerScroll's own `t.dom.scrollTop = ...` below -- setting
+    // scrollTop programmatically still dispatches a native 'scroll' event,
+    // and without this guard that echo would immediately report the
+    // server's own value straight back to it as if the user had scrolled
+    // there themselves (harmless -- same value -- but pointless chatter,
+    // and it stomps the "was this recently a *local* scroll" signal
+    // applyServerScroll depends on).
+    if (t.dom.applyingServerScroll) { t.dom.applyingServerScroll = false; return; }
+
+    t.dom.lastLocalScrollTime = Date.now();
     this.sessionState.preventscroll++;
     this.sessionState.preventscrollElem = t.scroll.element_id.id_;
-    //if (t.dom.scrollTop == t.scroll_offset[1] && t.dom.scrollLeft==t.scroll_offset[0]) return;
-    this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {this.sessionState.preventscroll--;});
+    this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {
+      this.sessionState.preventscroll--;
+      // preventscrollElem is a single global slot, not tracked per in-flight
+      // request -- it must be cleared once nothing is outstanding, or it
+      // permanently "remembers" whichever element last scrolled and blocks
+      // applyServerScroll from ever reconciling that element again, even
+      // long after this request actually completed (this was never visible
+      // before applyServerScroll existed, since nothing else read this
+      // field once the request settled).
+      if (!this.sessionState.preventscroll) this.sessionState.preventscrollElem = null;
+    });
     this.updateTargetHeights();
+  }
+
+  // Local scrolling is the whole point of this architecture -- a scroll
+  // gesture must never wait on the server. But the *server's* page can also
+  // move its own scroll positions (window.scrollTo(), infinite-scroll
+  // pagination, a "back to top" button, anything the page's own script
+  // does), and since PageStream only streams positions the server computed,
+  // that change is otherwise invisible until something makes the client
+  // adopt it. This reconciles the two: apply the server's reported
+  // scroll_offset for a '.scroll' element, but only once local activity on
+  // that *specific* element has gone quiet -- so an active user scroll
+  // always wins locally (the "typical case"), while a server-side
+  // reposition the user isn't actively fighting still eventually lands
+  // ("awkward script" case). Guards against redundant writes (the earlier,
+  // disabled version of this unconditionally set scrollTop/scrollLeft on
+  // every single update regardless of whether the value had even changed --
+  // called out in a comment here as a "perf bottleneck", which this avoids).
+  applyServerScroll(t) {
+    // A fresh incoming scroll_offset can legitimately be *stale* -- it's
+    // whatever the server had committed as of a round trip ago, and under
+    // real latency (the whole reason local scroll exists in the first
+    // place) that can lag several seconds behind a scroll already in
+    // flight. 2000ms is a deliberately generous margin against that,
+    // wider than a single round trip needs to be under most real-world
+    // latency -- worth being conservative here, since the failure mode of
+    // *too short* is actively snapping a live scroll backwards mid-fling
+    // (confirmed: reproduced at 400ms under 1s one-way injected latency,
+    // see test/run_latency.js), while *too long* just delays how quickly
+    // an "awkward script" server-side change is noticed, a much milder
+    // cost for what should be a rare case anyway.
+    var recentlyScrolledLocally = t.dom.lastLocalScrollTime && (Date.now() - t.dom.lastLocalScrollTime < 2000);
+    // Coarser, global backstop alongside the per-element check above: a
+    // touch's eventual scroll target isn't knowable without hit-testing, so
+    // this can't be narrowed to "this element specifically" -- any recent
+    // touch anywhere defers reconciliation everywhere, briefly. Shorter
+    // window than the per-element one (that touch may turn out to target a
+    // *different* element than the one being considered here, or none at
+    // all) but still long enough to cover momentum/fling's post-touchend
+    // ramp-up before its first native 'scroll' event fires.
+    var recentTouchAnywhere = this.sessionState.lastTouchTime && (Date.now() - this.sessionState.lastTouchTime < 1000);
+    var hasInFlightRequest = this.sessionState.preventscrollElem === t.scroll.element_id.id_;
+    if (recentlyScrolledLocally || hasInFlightRequest || this.sessionState.touchActive || recentTouchAnywhere) return;
+
+    var newTop = Math.round(t.scroll_offset[1]), newLeft = Math.round(t.scroll_offset[0]);
+    if (t.dom.scrollTop === newTop && t.dom.scrollLeft === newLeft) return;
+
+    t.dom.applyingServerScroll = true;
+    t.dom.scrollTop = newTop;
+    t.dom.scrollLeft = newLeft;
   }
   createDOMLayerImages(l) {
     l.images && l.images.forEach(i => {
@@ -203,6 +309,32 @@ export class Session {
       }
     });
   }
+  // Port of cc::LayerDrawOpacity (draw_property_utils.cc): the opacity a
+  // layer's own raster needs when composited is the product of every
+  // effect node's opacity from the layer's own node up to (but NOT
+  // including) the nearest ancestor-or-self node that owns a render
+  // surface -- that boundary node's own opacity gets applied separately,
+  // when *that surface* is composited into *its* target, a step this
+  // reconstruction doesn't otherwise replicate. Climbing all the way to
+  // the tree root instead (an earlier attempt at this) double-counts any
+  // opacity already "spent" at an intermediate render-surface boundary --
+  // harmless on a simple page with only one such boundary (the root
+  // surface), but produces widespread wrong-opacity corruption on complex
+  // real pages with several nested surfaces (confirmed: broke Wikipedia
+  // badly). If the layer's own node *is* such a boundary, its own raster
+  // needs no opacity here at all (1) -- the boundary's opacity is that
+  // separate, unreplicated compositing step's job, not this layer's.
+  layerDrawOpacity(l) {
+    var node = l.effect_tree_index;
+    if (!node) return 1;
+    if (node.render_surface_reason && node.render_surface_reason !== 'none') return 1;
+    var opacity = 1;
+    for (var n = node; n && n !== node.target_id; n = n.parent_id) {
+      if (n.opacity != null) opacity *= n.opacity;
+    }
+    return opacity;
+  }
+
   createDOMLayerNode(l) {
     if (!l.images || l.name == 'Frame Overlay Content Layer') return;
 
@@ -228,13 +360,26 @@ export class Session {
     
     this.createDOMLayerImages(l);
 
-    l.dom.style.top = l.offsetToTransformParent[1] + 'px';
-    l.dom.style.left = l.offsetToTransformParent[0] + 'px';
+    // offsetToTransformParent is expressed relative to the transform node's
+    // own property-tree origin -- but when that node carries a .clip (see
+    // above: a scroll frame's clip box is positioned via CSS top/left at
+    // clip[0],clip[1] rather than at the node's true origin), the node's
+    // *DOM box* origin is already shifted by that same clip amount. Without
+    // subtracting it back out here, every layer parented under a bordered/
+    // padded scroll frame renders one clip-offset too far right/down (see
+    // BUGS.md #5 -- confirmed by direct pixel measurement: frontend items
+    // landed exactly clip[0]/clip[1] past ground truth, uniformly in both
+    // axes, only on scrollers with a nonzero clip offset).
+    var clipOffsetX = (l.transform_tree_index.clip && l.transform_tree_index.clip.clip[0]) || 0;
+    var clipOffsetY = (l.transform_tree_index.clip && l.transform_tree_index.clip.clip[1]) || 0;
+    l.dom.style.top = (l.offsetToTransformParent[1] - clipOffsetY) + 'px';
+    l.dom.style.left = (l.offsetToTransformParent[0] - clipOffsetX) + 'px';
     l.dom.style.width=l.bounds[0] + 'px';
     l.dom.style.height=l.bounds[1] + 'px';
     l.dom.style.overflow = 'hidden';
     l.dom.style.position = 'absolute';
     l.dom.style.zIndex = l.zIndex;
+    l.dom.style.opacity = this.layerDrawOpacity(l);
     l.dom.setAttribute('l'+l.layerId, l.name);
     //l.dom.alt = l.name;
     //l.dom.l = l;
@@ -279,16 +424,37 @@ export class Session {
 
     
     t.dom.metadata = t;
-    t.dom.classList.add('link');
-    t.dom.classList.toggle('alive', !!t.sessionId);
+    if (this.options.showLinkOverlay) {
+      t.dom.classList.add('link');
+      t.dom.classList.toggle('alive', !!t.sessionId);
+    }
   }
 
-  toCss(matrix) {
-    var matrix = Array(16).fill().reverse().map((_,i) => matrix[Math.floor(i/4) + (i%4)*4]);
-    var res = 'matrix3d('+ matrix.join(',') + ')';
-    // Special case identity transform
-    if (res=="matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)") return '';
-    return res;
+  // t.local alone is NOT a transform node's actual to-parent transform --
+  // cc's TransformTree::UpdateLocalTransform (property_tree.cc) computes it
+  // as translate(post_translation + origin) * translate(-scroll_offset) *
+  // translate(sticky) * local * translate(-origin). This matters because
+  // `local` is very often just the "core" transform (e.g. a bare rotation
+  // matrix) with the actual pivot/position living in origin/post_translation
+  // instead -- Blink keeps them separate specifically so a compositor-thread
+  // animation can replay just `local` every frame without redoing the
+  // origin dance. Reading `local` alone (as this used to) renders such a
+  // node pivoting around (0,0) instead of its real transform-origin, and
+  // drops its position entirely when that position lives in
+  // post_translation rather than baked into local. Degrades to the exact
+  // previous behavior when origin/post_translation are both zero (the
+  // common case for ordinary, non-promoted content), so this is a strict
+  // generalization, not a conditional special case.
+  toCss(matrix, origin, postTranslation) {
+    matrix = Array(16).fill().map((_,i) => matrix[Math.floor(i/4) + (i%4)*4]);
+    var ox = (origin && origin[0]) || 0, oy = (origin && origin[1]) || 0, oz = (origin && origin[2]) || 0;
+    var px = (postTranslation && postTranslation[0]) || 0, py = (postTranslation && postTranslation[1]) || 0;
+    var parts = [];
+    if (px + ox || py + oy || oz) parts.push(`translate3d(${px + ox}px, ${py + oy}px, ${oz}px)`);
+    var mat = 'matrix3d(' + matrix.join(',') + ')';
+    if (mat !== 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)') parts.push(mat);
+    if (ox || oy || oz) parts.push(`translate3d(${-ox}px, ${-oy}px, ${-oz}px)`);
+    return parts.join(' ');
   }
 
 
@@ -322,12 +488,13 @@ export class Session {
       l.parent_id = effect_tree[get_tree_node(l.parent_id)];
       l.transform_id = transform_tree[get_tree_node(l.transform_id)];
       l.clip_id = clip_tree[get_tree_node(l.clip_id)];
+      l.target_id = effect_tree[get_tree_node(l.target_id)];
     });
     clip_tree.forEach(l => {
       l.parent_id = clip_tree[get_tree_node(l.parent_id)];
       l.transform_id = transform_tree[get_tree_node(l.transform_id)];
     });
-    
+
     this.sessionState = {...this.sessionState, clip_tree, effect_tree, scroll_tree, transform_tree, layer_tree};
 
   }
@@ -336,6 +503,24 @@ export class Session {
     this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
   }
   updateScreen() {
+    // updateScreen() only ever runs from a fresh 'PageStream.frameDone' (or
+    // once, at initial domElement assignment, before any gesture could have
+    // happened) -- so any call reaching here is proof a real server frame
+    // just arrived. If a pinch gesture left an optimistic zoom transform
+    // applied and has since ended, this is the real content that transform
+    // was standing in for -- clear it. A zoom-only update can arrive as a
+    // proptree change with no accompanying layer/image content, so this
+    // must NOT be gated on comittedLayerUpdates being non-empty -- doing so
+    // left the transform stuck forever whenever that happened, stacking it
+    // on top of the real (already correctly zoomed) content. Guarded on
+    // !this.pinch so an update that streams in mid-gesture doesn't fight
+    // with the live touch-driven transform.
+    if (this.pinchZoomApplied && !this.pinch && this.domElement_) {
+      this.domElement_.style.transform = '';
+      this.domElement_.style.transformOrigin = '';
+      this.pinchZoomApplied = false;
+    }
+
     this.sessionState.comittedLayerUpdates.forEach(params => {
       var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || { targets: {}};
 
@@ -378,6 +563,25 @@ export class Session {
             domImage.decode();
             // Indicates this HTMLElement can be referenced from multiple sessions.
             domImage.sharable = true;
+            if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, bufUpdate.image);
+          } else if (bufUpdate.tileId) {
+            // No `image` -- the server believes we already hold this tile's
+            // bytes under `tileId` (see tileStore's own comment above).
+            var cachedSrc = tileStore.get(bufUpdate.tileId);
+            if (cachedSrc) {
+              domImage = new Image();
+              domImage.src = cachedSrc;
+              domImage.decode();
+              domImage.sharable = true;
+            } else {
+              // A genuine cache miss: the server's residency model and this
+              // client's actual cache have diverged (there's no client-side
+              // eviction yet, so this shouldn't happen in practice -- but if
+              // it does, leave the region showing whatever was previously
+              // drawn there rather than guess at wrong pixels. No resend
+              // round-trip yet; see docs/tile-transport.md §6.
+              console.warn('PageStream: tileId', bufUpdate.tileId, 'referenced but not in local tileStore (cache miss)');
+            }
           }
           l.images.push({clip: bufUpdate.clip, dom: domImage});
         });
@@ -444,10 +648,52 @@ export class Session {
     if (e.cancel) {
       n = 'touchCancel';
     }
+    // A finger is down but hasn't produced a native 'scroll' event *yet* --
+    // browsers don't fire one on the very first touchmove, only once actual
+    // movement is registered -- so applyServerScroll's own recency check
+    // (which depends on a 'scroll' event having already happened at least
+    // once) can't see this window on its own. touchActive alone still
+    // leaves a second gap: browser-driven momentum/fling can keep scrolling
+    // well after touchend, and there's no guarantee a fresh 'scroll' event
+    // has fired by the time the *next* one would (confirmed empirically:
+    // reproduced with just touchActive in place, under 1s one-way injected
+    // latency -- see test/run_latency.js). Track touch recency globally
+    // (not per scroll element -- a touch's eventual target isn't known
+    // without hit-testing) as a second, coarser guard alongside it.
+    this.sessionState.touchActive = (n === 'touchStart' || n === 'touchMove');
+    this.sessionState.lastTouchTime = Date.now();
+    this.handlePinchGesture(n, e);
     this.ws.req('Input.dispatchTouchEvent', {
       type: n,
       touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
     });
+  }
+
+  // Scroll gets local prediction for free (native DOM scrolling on the '.scroll'
+  // elements), but pinch-zoom has no browser-native path here (the page's own
+  // <meta viewport> sets user-scalable=no, and there's no zoom handling on the
+  // server-streamed content either) -- the real zoomed re-render only shows up
+  // after a full server round trip. So apply an optimistic CSS transform on the
+  // root element the instant a 2-finger gesture starts, purely for immediate
+  // visual feedback, and let the real thing (the next genuine streamed update)
+  // replace it once it arrives.
+  handlePinchGesture(n, e) {
+    if (!this.domElement_) return;
+    if (e.touches.length == 2) {
+      var [t0, t1] = e.touches;
+      var dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      if (!this.pinch) this.pinch = {startDist: dist};
+      var scale = dist / this.pinch.startDist;
+      this.domElement_.style.transformOrigin = ((t0.clientX + t1.clientX) / 2) + 'px ' + ((t0.clientY + t1.clientY) / 2) + 'px';
+      this.domElement_.style.transform = 'scale(' + scale + ')';
+      this.pinchZoomApplied = true;
+    } else if (this.pinch) {
+      // Gesture ended (or dropped below 2 touches) -- leave the optimistic
+      // transform in place. Clearing it here would snap back to the
+      // pre-zoom layout for the rest of the round trip; updateScreen()
+      // clears it once real content replaces it instead.
+      this.pinch = null;
+    }
   }
 
   destroy() {

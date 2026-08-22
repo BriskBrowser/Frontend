@@ -27,7 +27,7 @@ export class Browser {
     // off all these requests to the browser before the client even
     // connects to speed up initial loading.
     socket.req(undefined, 'Target.setDiscoverTargets', {discover: true});
-    socket.eventListeners['Target.targetCreated'] = function (msg) {
+    socket.eventListeners['Target.targetCreated'] = msg => {
       if (msg.targetInfo.type == 'page' && !this.attached) {
         socket.req(undefined, 'Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
         this.attached = true;
@@ -119,8 +119,8 @@ export class Browser {
     
     
     var ws = new devToolsSession(this.socket, sessionId);
-    
-    var sess = new Session(ws, existingSession);
+
+    var sess = new Session(ws, existingSession, this.options);
     this.sessions[sessionId] = sess;
 
     

@@ -22,6 +22,12 @@ let options = {
 
   // Don't display previews of future windows
   fullscreen: false,
+
+  // Debug aid: outlines every clickable target region in translucent
+  // red (green once its session is alive). Off by default -- it's a
+  // developer visualization, not something end users should see painted
+  // over every link on every page.
+  showLinkOverlay: false,
 }
 
 typeof BBOptionsOverrides !== 'undefined' && Object.assign(options, BBOptionsOverrides)

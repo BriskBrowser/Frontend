@@ -45,6 +45,15 @@ export class Session {
     };
     
     this.ws.eventListeners['PageStream.frameDone'] = () => {
+      // Required by the protocol (browser_protocol.pdl: "Must be sent by
+      // the client once per frameDone") but was never actually implemented
+      // client-side -- previously harmless because nothing server-side
+      // depended on it, but the adaptive-bandwidth stop-and-wait gate in
+      // inspector_page_stream_agent.cc now blocks the next frame on this
+      // ack, so a missing ackFrame would stall the connection after one
+      // frame. Sent first, before the (synchronous but non-trivial)
+      // bookkeeping below, so the server sees it as promptly as possible.
+      this.ws.req('PageStream.ackFrame', {});
       this.sessionState.comittedLayerUpdates = this.sessionState.comittedLayerUpdates.concat(this.sessionState.nextLayerUpdates);
       this.sessionState.nextLayerUpdates = [];
       if (this.sessionState.nextProptrees) {

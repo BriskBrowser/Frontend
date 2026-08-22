@@ -582,6 +582,23 @@ export class Session {
               // round-trip yet; see docs/tile-transport.md §6.
               console.warn('PageStream: tileId', bufUpdate.tileId, 'referenced but not in local tileStore (cache miss)');
             }
+          } else if (bufUpdate.color !== undefined) {
+            // Uniform solid-color tile (docs/tile-transport.md §5) -- no
+            // image data at all, just fill the clip rect. `color` arrives
+            // as a signed 32-bit int (protocol `integer`); `>>> 0` undoes
+            // the 0xRRGGBBAA-packed-into-an-int32 reinterpretation
+            // inspector_page_stream_agent.cc's commitImage() applies.
+            var packed = bufUpdate.color >>> 0;
+            var r = (packed >>> 24) & 0xff, g = (packed >>> 16) & 0xff,
+                b = (packed >>> 8) & 0xff, a = packed & 0xff;
+            domImage = document.createElement('div');
+            // createDOMLayerImages() below also sets the `width`/`height`
+            // *properties* (meaningful for <img>, a no-op expando on a
+            // <div>) -- set the real CSS size here instead.
+            domImage.style.width = bufUpdate.clip.width + 'px';
+            domImage.style.height = bufUpdate.clip.height + 'px';
+            domImage.style.backgroundColor = 'rgba(' + r + ',' + g + ',' + b + ',' + (a / 255) + ')';
+            domImage.sharable = true;
           }
           l.images.push({clip: bufUpdate.clip, dom: domImage});
         });

@@ -564,6 +564,49 @@ export class Session {
             // Indicates this HTMLElement can be referenced from multiple sessions.
             domImage.sharable = true;
             if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, bufUpdate.image);
+          } else if (bufUpdate.srcTileId !== undefined) {
+            // Motion-vector reference ("blit", docs/tile-transport.md
+            // Section 4a): this tile's content is a verified byte-exact
+            // crop of an already-cached tile. Checked *before* the plain
+            // tileId branch below even though a blit response also
+            // carries its own `tileId` -- srcTileId is the more specific
+            // signal and must win, or this would be misrouted into the
+            // exact-match path, which would look up this tile's own
+            // (not-yet-cached) id instead of resolving the reference.
+            //
+            // dx/dy/rasterWidth/rasterHeight are all in the cached source
+            // image's *natural* pixel space, deliberately not CSS pixels:
+            // drawImage()'s 9-arg source-rect is always interpreted that
+            // way regardless of any CSS size applied to the image, so
+            // converting them server-side would just be wrong unit math
+            // for no benefit -- see inspector_page_stream_agent.cc's
+            // commitImage() for the full reasoning.
+            var srcCachedSrc = tileStore.get(bufUpdate.srcTileId);
+            if (srcCachedSrc) {
+              var srcImg = new Image();
+              srcImg.src = srcCachedSrc;
+              var canvas = document.createElement('canvas');
+              canvas.width = bufUpdate.clip.width;
+              canvas.height = bufUpdate.clip.height;
+              var ctx = canvas.getContext('2d');
+              var tileIdForCache = bufUpdate.tileId;
+              srcImg.decode().then(() => {
+                ctx.drawImage(srcImg, bufUpdate.dx, bufUpdate.dy, bufUpdate.rasterWidth, bufUpdate.rasterHeight,
+                              0, 0, bufUpdate.clip.width, bufUpdate.clip.height);
+                // Cache the reconstructed result under this tile's own id
+                // too -- a future BufferUpdate may reference *this* tile
+                // as a srcTileId (server-side, blit sources aren't
+                // limited to full-image tiles; see TileMotionIndex's
+                // Stage() call sites), and it needs to resolve the same
+                // way any other cached tile does.
+                if (tileIdForCache) tileStore.set(tileIdForCache, canvas.toDataURL());
+              }).catch(e => console.warn('PageStream: blit source', bufUpdate.srcTileId, 'failed to decode', e));
+              domImage = canvas;
+              domImage.sharable = true;
+            } else {
+              // Same cache-miss reasoning as the plain tileId branch below.
+              console.warn('PageStream: srcTileId', bufUpdate.srcTileId, 'referenced by blit but not in local tileStore (cache miss)');
+            }
           } else if (bufUpdate.tileId) {
             // No `image` -- the server believes we already hold this tile's
             // bytes under `tileId` (see tileStore's own comment above).

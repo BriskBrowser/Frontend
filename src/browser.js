@@ -78,7 +78,18 @@ export class Browser {
     var search = document.location.search;
     if (path.startsWith('/http')) return path.substring(1)+search+document.location.hash;
     if (search.startsWith('?http')) return search.substring(1)+document.location.hash;
-    return document.location.href;
+    // Real bug, found live: this used to fall back to document.location.href
+    // -- this app's OWN url -- whenever it was loaded with no target embedded
+    // in the path/query (e.g. visiting the bare deployment root). That tells
+    // the server-side browser to navigate to the Brisk Browser frontend
+    // itself, which loads and runs *this same client*, which attaches and
+    // navigates again, recursively -- a self-referential explosion of
+    // Target.attachToTarget/navigate calls that floods the connection with
+    // targets until it crashes. Observed directly: visiting the bare root
+    // produced hundreds of rapid connect/disconnect cycles in the server log
+    // (the "flickering" symptom) before the tab gave out. A sensible,
+    // non-self-referential default instead.
+    return 'https://en.wikipedia.org/wiki/Main_Page';
   }
 
   arrangeSessions() {

@@ -39,6 +39,24 @@ bb-session.fullscreen:not(.active){
   border: 0.5px solid rgba(0,255,0,0.4);
 }
 
+/* The real, shipped preload highlight (session.js's createTargetNode) --
+   shown whenever this target has an actual live speculative fork behind
+   it, independent of the .link debug overlay above. outline (not border)
+   so it never affects box sizing/layout of the invisible hit-target div
+   this is painted on, and pointer-events stays default (inherited, not
+   'none') so the highlighted region is still tappable. */
+.preloaded {
+  /* position: absolute now comes from createTargetNode() itself (see its
+     own comment) -- t.dom is always positioned, not just when the .link
+     debug overlay is on. */
+  z-index: 9999;
+  outline: 2px solid rgba(46, 204, 113, 0.85);
+  outline-offset: -2px;
+  border-radius: 3px;
+  box-shadow: 0 0 8px 1px rgba(46, 204, 113, 0.5);
+  transition: outline-color 0.15s, box-shadow 0.15s;
+}
+
 .t {
   transform-origin: 0px 0px 0px;
   position: absolute;

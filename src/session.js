@@ -426,6 +426,16 @@ export class Session {
         t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
     }
     if (t.dom.parentNode != container) container.appendChild(t.dom);
+    // Real bug, found while wiring up preload highlighting: position was
+    // only ever set to 'absolute' via the .link CSS class below, which is
+    // gated behind showLinkOverlay (off by default). With it off -- the
+    // normal, shipped case -- this div's left/top set below silently did
+    // nothing (they only apply to a positioned element), leaving every
+    // target's real touch hit-box sitting wherever normal document flow
+    // put it instead of over its actual on-page target. Set directly here,
+    // same pattern createDOMLayerNode already uses for its own dom's
+    // position, so hit-testing is correct regardless of the debug flag.
+    t.dom.style.position = 'absolute';
     t.dom.style.left = t.containingQuads[0][0]+'px';
     t.dom.style.top = t.containingQuads[0][1]+'px';
     t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
@@ -437,6 +447,16 @@ export class Session {
       t.dom.classList.add('link');
       t.dom.classList.toggle('alive', !!t.sessionId);
     }
+    // Real, shipped highlight for speculatively-preloaded links -- distinct
+    // from showLinkOverlay above, which is a dev-only debug outline over
+    // EVERY clickable target on the page (off by default; would paint
+    // dozens of boxes on a real page). t.sessionId is only ever set once
+    // SocketHandler.js's startNewBrowsers() has actually forked a live
+    // Chromium process for this specific target (see its streamLayerInfo
+    // relay) -- i.e. this is exactly the up-to-5-target preloaded set, not
+    // "every link", and it's on unconditionally so a real user actually
+    // sees which taps are about to be instant.
+    t.dom.classList.toggle('preloaded', !!t.sessionId);
   }
 
   // t.local alone is NOT a transform node's actual to-parent transform --

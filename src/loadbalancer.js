@@ -22,7 +22,19 @@ export function selectWebsocket(websocketServer, websocketPool) {
       if (socketPool.resolved) return;
       if ((socketPool.doneCount/socketPool.length >= 0.9 && socketPool.highestOpen>=0)
           || socketPool.doneCount==socketPool.length ) {
-        let goodSocketPool = socketPool.filter(x => x.load);
+        // Real bug, found by audit: x.load was used as a truthy check, but
+        // 0 -- the BEST possible load value (a fully idle backend) -- is
+        // falsy, so it silently got filtered OUT here. In the degenerate
+        // (and good!) case where every candidate backend is idle, this
+        // emptied goodSocketPool entirely despite every socket having
+        // opened successfully, rejecting the whole selectWebsocket()
+        // promise with `lasterr` (undefined, since nothing actually
+        // errored) instead of picking any of the perfectly good open
+        // connections. s.load is only ever set to a real number (1, or
+        // Load.GetLoad's result) on a successful open -- a socket that
+        // never opened never gets .load set at all -- so checking for
+        // "is a number" (not "is truthy") is the correct filter.
+        let goodSocketPool = socketPool.filter(x => typeof x.load === 'number');
         goodSocketPool.sort((a,b) => a.load - b.load);
 
         socketPool.resolved = true;

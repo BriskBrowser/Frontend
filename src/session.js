@@ -406,7 +406,16 @@ export class Session {
     if (type=='touchStart' && evt.touches.length==1) {
       evt.currentTarget.metadata.touchStarted = true;
     } else if (type=='touchEnd' && evt.currentTarget.metadata.touchStarted) {
-      if (evt.currentTarget.metadata.sessionId) {
+      // Real bug, found live: this used to fire on sessionId alone --
+      // SocketHandler.js sets that the instant a speculative fork exists,
+      // well before its own pre-navigation (PageStream.clickNode) has
+      // actually finished (measured live: 6+ seconds for a real
+      // destination page). Activating instantly on a fork that hasn't
+      // gone anywhere yet swapped the client straight to stale/blank
+      // content instead of the promised instant page. `ready` is a
+      // separate flag SocketHandler.js now sends only once that
+      // navigation genuinely succeeds -- see its own comment.
+      if (evt.currentTarget.metadata.sessionId && evt.currentTarget.metadata.ready) {
         // Means we have preloaded this click - we just need to transfer to that session.
         this.onSessionActivate(evt.currentTarget.metadata.sessionId);
       }
@@ -455,8 +464,13 @@ export class Session {
     // Chromium process for this specific target (see its streamLayerInfo
     // relay) -- i.e. this is exactly the up-to-5-target preloaded set, not
     // "every link", and it's on unconditionally so a real user actually
-    // sees which taps are about to be instant.
-    t.dom.classList.toggle('preloaded', !!t.sessionId);
+    // sees which taps are about to be instant. Also requires t.ready: a
+    // fork exists (sessionId set) well before its own speculative
+    // navigation has actually finished (measured live: 6+ seconds) --
+    // highlighting green before then would promise a tap is instant when
+    // it isn't yet. See targetTouch()'s matching guard and
+    // SocketHandler.js's own comment on where `ready` comes from.
+    t.dom.classList.toggle('preloaded', !!(t.sessionId && t.ready));
   }
 
   // t.local alone is NOT a transform node's actual to-parent transform --

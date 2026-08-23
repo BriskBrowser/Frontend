@@ -39,6 +39,7 @@ export class Browser {
       console.log("new target", msg);
       
       var sess = this.addSession(msg.sessionId, null);
+      if (!sess) return;   // duplicate attach for a session we already have
       this.sessionActivate(msg.sessionId);
 
       sess.resize();
@@ -48,6 +49,7 @@ export class Browser {
     };
 
     socket.eventListeners['Target.detachedFromTarget'] = msg => {
+      if (!this.sessions[msg.sessionId]) return;   // duplicate/unmatched detach
       this.sessions[msg.sessionId].destroy();
       delete this.sessions[msg.sessionId];
       this.arrangeSessions();
@@ -94,7 +96,7 @@ export class Browser {
   sessionSetHeight(fromSessionId, toSessionId, height) {
     this.sessions[fromSessionId].childArrangement = this.sessions[fromSessionId].childArrangement || {};
     this.sessions[fromSessionId].childArrangement[toSessionId] = height;
-    arrangeSessions();
+    this.arrangeSessions();
   }
 
   sessionActivate(sessionId) {
@@ -125,10 +127,18 @@ export class Browser {
 
     
     // Event emitted whenever this session wants to trigger the creation of a clone of itself.
-    sess.onNewSession = this.addSession;
+    // Unbound, these run with `this` == the Session that calls them (session.js
+    // invokes them as `this.onX(...)`), not the Browser -- both immediately
+    // dereferenced this.sessions/this.socket/this.rootElement, none of which
+    // exist on a Session, throwing every time. onSessionActivate in particular
+    // is called from targetTouch() -- the real user-tap handler that promotes a
+    // preloaded/predicted session on tap, i.e. the product's headline "zero
+    // perceived latency" mechanic -- so every real tap on a preloaded target
+    // silently failed to activate it.
+    sess.onNewSession = this.addSession.bind(this);
 
     // Event emitted whenever this session wants to activate another session.
-    sess.onSessionActivate = this.sessionActivate;
+    sess.onSessionActivate = this.sessionActivate.bind(this);
 
     // UX data linkage to allow non-active sessions to be rendered on the screen at positions
     // dependant on the links which will activate them.  Called repeatedly on scroll.

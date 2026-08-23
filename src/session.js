@@ -555,16 +555,6 @@ export class Session {
         l.images = l.images || [];
 
         params.bufferUpdates.forEach(bufUpdate => {
-          // Cull images this new image covers up (note - this test could cull more things)
-          for (let i = l.images.length - 1; i >= 0; i--) {
-            if (l.images[i].clip.x >= bufUpdate.clip.x &&
-              l.images[i].clip.y >= bufUpdate.clip.y &&
-              l.images[i].clip.x + l.images[i].clip.width <= bufUpdate.clip.x + bufUpdate.clip.width &&
-              l.images[i].clip.y + l.images[i].clip.height <= bufUpdate.clip.y + bufUpdate.clip.height) {
-            l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
-            l.images.splice(i, 1);
-            }
-          }
           var domImage;
           if (bufUpdate.image) {
             domImage = new Image();
@@ -652,7 +642,38 @@ export class Session {
             domImage.style.backgroundColor = 'rgba(' + r + ',' + g + ',' + b + ',' + (a / 255) + ')';
             domImage.sharable = true;
           }
-          l.images.push({clip: bufUpdate.clip, dom: domImage});
+
+          // Real bug, found live: this cull-and-replace used to run
+          // unconditionally, before domImage was even computed. On a cache
+          // miss (the tileId/srcTileId branches above, when nothing was
+          // actually resolved) domImage stays undefined -- but the old code
+          // still culled whatever tile was previously covering this region
+          // AND pushed a new {dom: undefined} entry in its place, directly
+          // contradicting the cache-miss comments' own stated intent
+          // ("leave the region showing whatever was previously drawn
+          // there"). Worse, createDOMLayerImages() below unconditionally
+          // dereferences every entry's `.dom.activeInLayer` -- hitting the
+          // undefined entry threw a TypeError that aborted the *rest* of
+          // that updateScreen() pass partway through, leaving other layers
+          // stuck mid-update. That's what produced the garbled/overlapping
+          // tile rendering seen live (screenshot against the real deployed
+          // instance): a single cache-miss tile anywhere on the page could
+          // corrupt the whole frame. Only cull+replace when there's an
+          // actual replacement image; a cache miss now correctly leaves the
+          // existing tile (and DOM) completely untouched.
+          if (domImage) {
+            // Cull images this new image covers up (note - this test could cull more things)
+            for (let i = l.images.length - 1; i >= 0; i--) {
+              if (l.images[i].clip.x >= bufUpdate.clip.x &&
+                l.images[i].clip.y >= bufUpdate.clip.y &&
+                l.images[i].clip.x + l.images[i].clip.width <= bufUpdate.clip.x + bufUpdate.clip.width &&
+                l.images[i].clip.y + l.images[i].clip.height <= bufUpdate.clip.y + bufUpdate.clip.height) {
+              l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
+              l.images.splice(i, 1);
+              }
+            }
+            l.images.push({clip: bufUpdate.clip, dom: domImage});
+          }
         });
       }
 

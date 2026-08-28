@@ -1,30 +1,33 @@
-# BriskBrowser
+# BriskBrowser frontend
 
-This repo contains the frontend to BriskBrowser.  The backend is located [here](https://github.com/BriskBrowser/chromium).
+The frontend is a thin mobile browser client. A remote patched Chromium sends
+PageStream compositor layers, property trees, raster tiles, click targets, and
+interaction state; the frontend reconstructs that state in ordinary HTML/CSS
+and applies latency-sensitive gestures locally.
 
-A hosted version is available [here](https://briskbrowser.com).  (Note:  Must use Android mobile browser or Chrome devtools emulation, Uptime: 50% or so during UK working hours, down the rest of the time...)
+The project remains experimental rather than a daily-use browser.
 
-## Project Goals
+## Implemented
 
-Make a mobile web browser where every interaction is zero delay.   To achieve this, we render all content into images *serverside*, and send to the client all data necessary for all possible interactions.   All scroll, zoom, and click events should not require a server round-trip, so the user should never notice network latency.  All data necessary for any of those interactions is preloaded.
+- reconstruction of most ordinary web layouts;
+- local touch scrolling and pinch-zoom prediction;
+- link hit targets and instant activation of ready preloaded branches;
+- keyboard/form state forwarding;
+- browser back/forward history integration;
+- content-addressed tile reuse, solid tiles, and motion references;
+- optimistic preview/truth session activation and status;
+- interaction trace recording for real-device reproduction;
+- Android/mobile Chrome support.
 
-We aren't there yet - this project is currently a proof of concept, and isn't yet usable for daily browsing.
+## Important limitations
 
-Major features implemented:
+- default aggressive caching can briefly render another user's cached response;
+- video and general GPU-resource transport are incomplete;
+- the in-tab tile store does not yet have bounded eviction/reference counting;
+- a first-ever uncached URL still pays its real origin RTT (learned responses
+  and linked destinations use the shared cache/preload paths);
+- iOS support remains constrained by codec and interaction differences.
 
- * Correctly rendering most webpages
- * Scrolling on the client
- * Android support
-
-Major features missing:
-
- * Clicking/Prerendering pages
- * Keyboard input
- * Video playback
- * Zooming
- * iOS support (due to no WebP)
-
-## Contributing
-
-Get involved [here](docs/contributing.md)!
-
+See the root repository's `BUGS.md`, `docs/optimistic-cache.md`, and
+`docs/tile-transport.md` for current behavior. Contributor setup is in
+`docs/contributing.md`.

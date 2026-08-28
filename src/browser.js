@@ -1,6 +1,7 @@
-import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js'
-import {selectWebsocket} from './loadbalancer.js'
-import {Session} from './session.js'
+import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260825-earlyevents1'
+import {selectWebsocket} from './loadbalancer.js?v=20260825-earlyevents1'
+import {Session} from './session.js?v=20260826-linkquads1'
+import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
 
 export class Browser {
@@ -8,9 +9,18 @@ export class Browser {
     this.rootElement = rootElement;
     this.options = options;
     this.sessions = {};
+    this.historyTraversal = false;
   }
 
   async init() {
+    // The eager compositor snapshot is intentionally specific to the default
+    // landing page. Never flash Wikipedia while loading an explicitly
+    // requested URL; that request goes straight to the live PageStream path.
+    if (this.currentURL() !== 'https://en.wikipedia.org/wiki/Main_Page') {
+      const warmPreview = document.getElementById('warm-preview');
+      if (warmPreview) warmPreview.remove();
+    }
+
     // get the websocket loading early in the page load.
     let wsPromise = selectWebsocket(this.options.websocketServer, this.options.websocketPool);
 
@@ -21,12 +31,31 @@ export class Browser {
     }
 
     window.sessions = this.sessions;  // for testing
+    // The outer browser's address/history is the thin client's navigation
+    // UI. Store the represented server-side URL in every entry so native
+    // back and forward buttons can drive the active remote page.
+    history.replaceState({briskURL: this.currentURL()}, '',
+        this.frontendPathForURL(this.currentURL()));
+    window.addEventListener('popstate', event => {
+      const url = event.state && event.state.briskURL || this.currentURL();
+      const session = this.sessions[this.activeSession];
+      if (!session || !url) return;
+      this.historyTraversal = true;
+      // Covers both back and forward (popstate doesn't distinguish them),
+      // but 'back' is overwhelmingly the real-world case (mobile back
+      // button/edge-swipe) and the destination url is what replay actually
+      // needs, so a single event type is enough here.
+      interactionTrace.record('back', {url});
+      session.ws.req('PageStream.navigateHistory', {url}).catch(error => {
+        this.historyTraversal = false;
+        console.error('History navigation failed:', error);
+      });
+    });
 
     // All these are run serially on connection, but none depend on a
     // response from a request.  The intention is a server can fire
     // off all these requests to the browser before the client even
     // connects to speed up initial loading.
-    socket.req(undefined, 'Target.setDiscoverTargets', {discover: true});
     socket.eventListeners['Target.targetCreated'] = msg => {
       if (msg.targetInfo.type == 'page' && !this.attached) {
         socket.req(undefined, 'Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
@@ -44,7 +73,14 @@ export class Browser {
 
       sess.resize();
       sess.ws.req('Page.enable', {});
-      sess.ws.req('PageStream.enable', {fps: 0, targetBandwidth: 999999999});
+      // Proxy-only capability: SocketHandler strips binaryTiles before
+      // forwarding this command to Chromium. Negotiated clients receive tile
+      // payloads as binary WebSocket frames and Blob URLs instead of paying
+      // Base64 expansion/decoding in JSON.
+      sess.ws.req('PageStream.enable', {
+        fps: 0, targetBandwidth: 999999999, binaryTiles: true
+      });
+      interactionTrace.record('navigate', {url: this.currentURL()});
       sess.ws.req('Page.navigate', {url: this.currentURL()});
     };
 
@@ -56,15 +92,15 @@ export class Browser {
     }
 
     socket.eventListeners['Target.targetInfoChanged'] = params => {
-      return; // TODO:  Fix
-      // Update URL and page title
-      if (params.targetInfo.url.startsWith('http'))
-        if (this.currentURL() != params.targetInfo.url)
-          history.pushState({}, "test", '/'+params.targetInfo.url);
-      // This doesn't work properly because the browser doesn't emit an event if
-      // the title changes without a navigation event happening.
-      document.title = params.targetInfo.title;
+      if (params.targetInfo.title) document.title = params.targetInfo.title;
+      if (params.targetInfo.url && params.targetInfo.url.startsWith('http'))
+        this.committedURLChanged(this.activeSession, params.targetInfo.url);
     };
+
+    // Enabling discovery can synchronously produce targetCreated on a fast
+    // local backend. Install every handshake listener first so the initial
+    // page target cannot arrive in the gap and leave this client blank.
+    socket.req(undefined, 'Target.setDiscoverTargets', {discover: true});
 
 
     var resize = () => {
@@ -92,6 +128,22 @@ export class Browser {
     return 'https://en.wikipedia.org/wiki/Main_Page';
   }
 
+  frontendPathForURL(url) {
+    return '/' + url;
+  }
+
+  committedURLChanged(sessionId, url) {
+    if (!url || !url.startsWith('http') || sessionId !== this.activeSession) return;
+    const stateURL = history.state && history.state.briskURL;
+    if (stateURL === url) {
+      this.historyTraversal = false;
+      return;
+    }
+    const method = this.historyTraversal ? 'replaceState' : 'pushState';
+    history[method]({briskURL: url}, '', this.frontendPathForURL(url));
+    this.historyTraversal = false;
+  }
+
   arrangeSessions() {
     return;
     var ca = this.sessions[this.activeSession].childArrangement;
@@ -110,7 +162,7 @@ export class Browser {
     this.arrangeSessions();
   }
 
-  sessionActivate(sessionId) {
+  sessionActivate(sessionId, destinationURL) {
 /*    Object.keys(sessions).forEach((sid) => {
       //var cl = sessions[sid].domElement_.classList;
       //cl.replace('active', 'old-active');
@@ -124,6 +176,12 @@ export class Browser {
     this.sessions[sessionId].domElement = elem;
 
     this.activeSession = sessionId;
+    if (destinationURL) this.sessions[sessionId].currentURL = destinationURL;
+    // A speculative session normally completed its navigation while hidden,
+    // so its frameNavigated event was correctly ignored by the address bar.
+    // Publish that stored destination at the exact promotion point.
+    if (this.sessions[sessionId].currentURL)
+      this.committedURLChanged(sessionId, this.sessions[sessionId].currentURL);
     this.arrangeSessions();
   }
 
@@ -154,6 +212,7 @@ export class Browser {
     // UX data linkage to allow non-active sessions to be rendered on the screen at positions
     // dependant on the links which will activate them.  Called repeatedly on scroll.
     sess.onSessionSetHeight = this.sessionSetHeight.bind(this, sessionId);
+    sess.onURLChange = this.committedURLChanged.bind(this, sessionId);
 
     return sess;
   }

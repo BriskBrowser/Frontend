@@ -57,6 +57,12 @@ bb-session.fullscreen:not(.active){
   transition: outline-color 0.15s, box-shadow 0.15s;
 }
 
+.link-hit-region {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: auto;
+}
+
 .t {
   transform-origin: 0px 0px 0px;
   position: absolute;
@@ -73,6 +79,16 @@ bb-session.fullscreen:not(.active){
 #browser {
     width: 100vw;
     height: 100vh;
+}
+
+#warm-preview {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    object-fit: cover;
+    object-position: top left;
+    z-index: 0;
 }
 
 /* Phone emulation for desktop browsers */

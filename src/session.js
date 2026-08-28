@@ -1,4 +1,6 @@
 import {deepClone} from './deepclone.js'
+import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
+import {applyPropTreePatch} from './propTreePatch.js'
 
 // Session-global cache of tile bytes by content id (server-computed hash of
 // the tile's pixels), shared across every layer and every Session in this
@@ -26,6 +28,7 @@ export class Session {
     this.onNewSession = () => {};
     this.onSessionActivate = () => {};
     this.onSessionSetHeight = () => {};
+    this.onURLChange = () => {};
 
     if (baseSession) {
       this.sessionState = deepClone(baseSession.sessionState);
@@ -39,8 +42,34 @@ export class Session {
       });
     };
 
+    // `this.lastPropertyTreesJSON` is the raw string form of whatever
+    // `nextProptrees` was last set from -- kept specifically so a later
+    // PageStream.streamPropTreesPatch has something to apply against. Not
+    // part of `sessionState` (so not carried over by the deepClone(
+    // baseSession.sessionState) above): a promoted/forked session gets a
+    // brand-new client-facing sessionId, and SocketHandler.js's
+    // diffPropTrees() starts every new session with no server-side
+    // baseline either, so its first tree is always sent in full -- nothing
+    // here needs a patch target inherited from a prior session.
     this.ws.eventListeners['PageStream.streamPropTrees'] =  params => {
+      this.lastPropertyTreesJSON = params.propertyTreesJSON;
       this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
+      this.fullUpdateRequired = true;
+    };
+
+    this.ws.eventListeners['PageStream.streamPropTreesPatch'] =  params => {
+      if (this.lastPropertyTreesJSON === undefined) {
+        // Shouldn't happen (see diffPropTrees()'s own comment: the first
+        // send for a session is always a full streamPropTrees, never a
+        // patch), but a patch with nothing to apply against is unusable --
+        // drop it rather than crash the session on a corrupt/out-of-order
+        // message.
+        console.error('PageStream.streamPropTreesPatch received with no prior full tree; dropping');
+        return;
+      }
+      const json = applyPropTreePatch(this.lastPropertyTreesJSON, params.ops);
+      this.lastPropertyTreesJSON = json;
+      this.sessionState.nextProptrees = JSON.parse(json);
       this.fullUpdateRequired = true;
     };
     
@@ -54,13 +83,7 @@ export class Session {
       // frame. Sent first, before the (synchronous but non-trivial)
       // bookkeeping below, so the server sees it as promptly as possible.
       this.ws.req('PageStream.ackFrame', {});
-      this.sessionState.comittedLayerUpdates = this.sessionState.comittedLayerUpdates.concat(this.sessionState.nextLayerUpdates);
-      this.sessionState.nextLayerUpdates = [];
-      if (this.sessionState.nextProptrees) {
-        this.sessionState.comittedProptrees = this.sessionState.nextProptrees;
-        delete this.sessionState.nextProptrees;
-      }
-      this.scheduleUpdateScreen();
+      this.commitPendingUpdates(true);
     };
 
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {
@@ -69,6 +92,51 @@ export class Session {
       this.updateKeyboard();
     }
 
+    this.ws.eventListeners['PageStream.linkText'] = params => {
+      const text = (params.linkText || '').replace(/\s+/g, ' ').trim();
+      this.sessionState.layer_tree.forEach(layer => {
+        const target = layer && layer.targets && layer.targets[params.backendNodeId];
+        if (!target) return;
+        target.linkText = text;
+        if (target.dom) target.dom.querySelectorAll('.link-hit-region').forEach(region => {
+          region.dataset.linkText = text;
+          region.setAttribute('aria-label', text || 'clickable target');
+        });
+      });
+    };
+
+    this.ws.eventListeners['Page.frameNavigated'] = params => {
+      // Child-frame navigations must not replace the browser's address.
+      if (params.frame && !params.frame.parentId && params.frame.url) {
+        this.currentURL = params.frame.url;
+        this.onURLChange(this.currentURL);
+      }
+    };
+    this.ws.eventListeners['Page.navigatedWithinDocument'] = params => {
+      if (params.url) {
+        this.currentURL = params.url;
+        this.onURLChange(this.currentURL);
+      }
+    };
+
+  }
+
+  // Tiles arrive before frameDone, and a complex page can spend well over a
+  // second finishing the rest of that frame. Once property trees exist, the
+  // updates already received are independently renderable; paint them on the
+  // next animation frame instead of holding a useful first viewport behind
+  // the server's end-of-frame bookkeeping.
+  commitPendingUpdates(force = false) {
+    if (!force && !this.sessionState.nextProptrees &&
+        !this.sessionState.comittedProptrees) return;
+    this.sessionState.comittedLayerUpdates =
+      this.sessionState.comittedLayerUpdates.concat(this.sessionState.nextLayerUpdates);
+    this.sessionState.nextLayerUpdates = [];
+    if (this.sessionState.nextProptrees) {
+      this.sessionState.comittedProptrees = this.sessionState.nextProptrees;
+      delete this.sessionState.nextProptrees;
+    }
+    this.scheduleUpdateScreen();
   }
 
   // Element ele is adopted by this Session.  It will be removed if a new element is bound.
@@ -206,7 +274,7 @@ export class Session {
         t.dom.style.left = t.clip.clip[0] + 'px';
         t.dom.style.borderRadius = this.roundedCornerCssFor(t.clip);
       }
-      t.dom.style.transform = this.toCss(t.local, t.origin, t.post_translation);
+      this.applyTransformCss(t);
 
       if (t.scroll) this.applyServerScroll(t);
       t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
@@ -226,9 +294,27 @@ export class Session {
         t.sessionId && t.containingQuads && this.onSessionSetHeight(t.sessionId, t.containingQuads[0][1])
       })
     });
+
+    if (this.sessionState.layer_tree.some(l => l && l.images && l.images.length)) {
+      const warmPreview = document.getElementById('warm-preview');
+      if (warmPreview) warmPreview.remove();
+    }
   }
 
   scrollHandler(t, evt) {
+    // Any scroll of `t` -- local (a real touch-driven gesture) or the echo
+    // fired by applyServerScroll's own `t.dom.scrollTop = ...` below --
+    // moves whatever this container's boundary sticky elements are
+    // anchored to, and must be reflected the instant it happens, with no
+    // round trip: that's the entire point of computing sticky offsets
+    // client-side (see stickyOffsetPx's own comment) rather than only ever
+    // applying whatever the server last streamed. Deliberately placed
+    // before the echo-detection guard right below: that guard exists only
+    // to stop a feedback loop back to the server (re-reporting a position
+    // the server itself just set), which has nothing to do with sticky
+    // elements needing to notice this container moved either way.
+    this.refreshStickyFor(t);
+
     // Distinguishes a real (touch-driven) scroll from the echo fired by
     // applyServerScroll's own `t.dom.scrollTop = ...` below -- setting
     // scrollTop programmatically still dispatches a native 'scroll' event,
@@ -242,7 +328,7 @@ export class Session {
     t.dom.lastLocalScrollTime = Date.now();
     this.sessionState.preventscroll++;
     this.sessionState.preventscrollElem = t.scroll.element_id.id_;
-    this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)}).then(x => {
+    const scrollRequestFinished = () => {
       this.sessionState.preventscroll--;
       // preventscrollElem is a single global slot, not tracked per in-flight
       // request -- it must be cleared once nothing is outstanding, or it
@@ -252,7 +338,9 @@ export class Session {
       // before applyServerScroll existed, since nothing else read this
       // field once the request settled).
       if (!this.sessionState.preventscroll) this.sessionState.preventscrollElem = null;
-    });
+    };
+    this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)})
+      .then(scrollRequestFinished, scrollRequestFinished);
     this.updateTargetHeights();
   }
 
@@ -294,8 +382,35 @@ export class Session {
     // all) but still long enough to cover momentum/fling's post-touchend
     // ramp-up before its first native 'scroll' event fires.
     var recentTouchAnywhere = this.sessionState.lastTouchTime && (Date.now() - this.sessionState.lastTouchTime < 1000);
-    var hasInFlightRequest = this.sessionState.preventscrollElem === t.scroll.element_id.id_;
-    if (recentlyScrolledLocally || hasInFlightRequest || this.sessionState.touchActive || recentTouchAnywhere) return;
+    // An unanswered setScroll request must not veto newer server truth
+    // forever. The per-element quiet window already covers its meaningful
+    // race with the gesture; after that, reconciliation is authoritative.
+    if (recentlyScrolledLocally || this.sessionState.touchActive || recentTouchAnywhere) {
+      // This update is still the newest server truth; deferring must not
+      // mean dropping it forever if no later layer update happens to arrive.
+      // Keep one timer per scroll container and retry after the grace windows
+      // have had a chance to expire. Persistent activity simply re-arms the
+      // same bounded timer until reconciliation is safe.
+      // Always replace the pending target: several property-tree updates can
+      // arrive during one grace period (including the echo of the user's old
+      // position followed by newer page-script truth).
+      t.dom.serverScrollPendingTarget = t;
+      if (!t.dom.serverScrollRetryTimer) {
+        t.dom.serverScrollRetryTimer = setTimeout(() => {
+          t.dom.serverScrollRetryTimer = null;
+          const pending = t.dom.serverScrollPendingTarget;
+          t.dom.serverScrollPendingTarget = null;
+          this.applyServerScroll(pending);
+        }, 250);
+      }
+      return;
+    }
+
+    if (t.dom.serverScrollRetryTimer) {
+      clearTimeout(t.dom.serverScrollRetryTimer);
+      t.dom.serverScrollRetryTimer = null;
+    }
+    t.dom.serverScrollPendingTarget = null;
 
     var newTop = Math.round(t.scroll_offset[1]), newLeft = Math.round(t.scroll_offset[0]);
     if (t.dom.scrollTop === newTop && t.dom.scrollLeft === newLeft) return;
@@ -376,7 +491,7 @@ export class Session {
     // *DOM box* origin is already shifted by that same clip amount. Without
     // subtracting it back out here, every layer parented under a bordered/
     // padded scroll frame renders one clip-offset too far right/down (see
-    // BUGS.md #5 -- confirmed by direct pixel measurement: frontend items
+    // Confirmed by the border/padding-scroll pixel regression: frontend items
     // landed exactly clip[0]/clip[1] past ground truth, uniformly in both
     // axes, only on scrollers with a nonzero clip offset).
     var clipOffsetX = (l.transform_tree_index.clip && l.transform_tree_index.clip.clip[0]) || 0;
@@ -417,8 +532,25 @@ export class Session {
       // navigation genuinely succeeds -- see its own comment.
       if (evt.currentTarget.metadata.sessionId && evt.currentTarget.metadata.ready) {
         // Means we have preloaded this click - we just need to transfer to that session.
+        // The destination recorded on the clickable target is only a
+        // prediction/readiness label and may be an intermediate redirect.
+        // Every fork's Session independently tracks authoritative Chromium
+        // Page.frameNavigated/navigatedWithinDocument events. Promote that
+        // session as-is; sessionActivate publishes its currentURL, and any
+        // later canonicalisation continues to update the active address bar.
         this.onSessionActivate(evt.currentTarget.metadata.sessionId);
       }
+      // changedTouches (not touches, which is empty by touchend) gives the
+      // lifted finger's last known position -- the actual tap point, useful
+      // for replaying this exact click by coordinate later (see
+      // test/replayTrace.js).
+      const liftedTouch = evt.changedTouches && evt.changedTouches[0];
+      interactionTrace.record('click', {
+        x: liftedTouch ? Math.round(liftedTouch.clientX) : undefined,
+        y: liftedTouch ? Math.round(liftedTouch.clientY) : undefined,
+        backendNodeId: evt.currentTarget.metadata.backendNodeId,
+        linkText: evt.currentTarget.dataset.linkText || undefined,
+      });
       this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
       evt.cancel = true;
     } else {
@@ -431,31 +563,50 @@ export class Session {
     var container = l.dom.parentNode;
     if (!t.dom) {
       t.dom=document.createElement('div');
-      ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
-        t.dom.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
     }
     if (t.dom.parentNode != container) container.appendChild(t.dom);
-    // Real bug, found while wiring up preload highlighting: position was
-    // only ever set to 'absolute' via the .link CSS class below, which is
-    // gated behind showLinkOverlay (off by default). With it off -- the
-    // normal, shipped case -- this div's left/top set below silently did
-    // nothing (they only apply to a positioned element), leaving every
-    // target's real touch hit-box sitting wherever normal document flow
-    // put it instead of over its actual on-page target. Set directly here,
-    // same pattern createDOMLayerNode already uses for its own dom's
-    // position, so hit-testing is correct regardless of the debug flag.
+    // A link can produce several quads when its inline content wraps, and a
+    // transformed target can be a non-axis-aligned quadrilateral. The old
+    // frontend used only containingQuads[0], making later lines untappable
+    // and filling gaps in uneven shapes. Keep a pointer-transparent owner
+    // and create one clipped, independently hittable region per real quad.
     t.dom.style.position = 'absolute';
-    t.dom.style.left = t.containingQuads[0][0]+'px';
-    t.dom.style.top = t.containingQuads[0][1]+'px';
-    t.dom.style.width = (t.containingQuads[0][4]-t.containingQuads[0][0])+'px';
-    t.dom.style.height = (t.containingQuads[0][5]-t.containingQuads[0][1])+'px';
-
-    
+    t.dom.style.inset = '0';
+    t.dom.style.pointerEvents = 'none';
     t.dom.metadata = t;
-    if (this.options.showLinkOverlay) {
-      t.dom.classList.add('link');
-      t.dom.classList.toggle('alive', !!t.sessionId);
-    }
+    t.dom.replaceChildren();
+    const automationText = (t.linkText || '').replace(/\s+/g, ' ').trim();
+    t.containingQuads.forEach((quad, quadIndex) => {
+      if (!quad || quad.length < 8) return;
+      const xs = [quad[0], quad[2], quad[4], quad[6]];
+      const ys = [quad[1], quad[3], quad[5], quad[7]];
+      const left = Math.min(...xs), top = Math.min(...ys);
+      const width = Math.max(...xs) - left, height = Math.max(...ys) - top;
+      if (width <= 0 || height <= 0) return;
+      const region = document.createElement('div');
+      region.className = 'link-hit-region';
+      region.style.position = 'absolute';
+      region.style.pointerEvents = 'auto';
+      region.style.left = left + 'px';
+      region.style.top = top + 'px';
+      region.style.width = width + 'px';
+      region.style.height = height + 'px';
+      region.style.clipPath = 'polygon(' + xs.map((x, i) =>
+        (((x - left) / width) * 100) + '% ' + (((ys[i] - top) / height) * 100) + '%').join(',') + ')';
+      region.metadata = t;
+      region.dataset.backendNodeId = t.backendNodeId;
+      region.dataset.linkText = automationText;
+      region.dataset.linkQuad = quadIndex;
+      region.setAttribute('aria-label', automationText || 'clickable target');
+      ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
+        region.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
+      if (this.options.showLinkOverlay) {
+        region.classList.add('link');
+        region.classList.toggle('alive', !!t.sessionId);
+      }
+      region.classList.toggle('preloaded', !!(t.sessionId && t.ready));
+      t.dom.appendChild(region);
+    });
     // Real, shipped highlight for speculatively-preloaded links -- distinct
     // from showLinkOverlay above, which is a dev-only debug outline over
     // EVERY clickable target on the page (off by default; would paint
@@ -470,7 +621,6 @@ export class Session {
     // highlighting green before then would promise a tap is instant when
     // it isn't yet. See targetTouch()'s matching guard and
     // SocketHandler.js's own comment on where `ready` comes from.
-    t.dom.classList.toggle('preloaded', !!(t.sessionId && t.ready));
   }
 
   // t.local alone is NOT a transform node's actual to-parent transform --
@@ -488,18 +638,147 @@ export class Session {
   // previous behavior when origin/post_translation are both zero (the
   // common case for ordinary, non-promoted content), so this is a strict
   // generalization, not a conditional special case.
-  toCss(matrix, origin, postTranslation) {
+  //
+  // `-scroll_offset` is deliberately still not here: this reconstruction
+  // implements scrolling as native DOM scrollTop/scrollLeft on a '.scroll'
+  // box (see applyServerScroll/scrollHandler), not as a baked-in transform
+  // offset, so cc's own scroll_offset term has no equivalent to apply here.
+  // `sticky` (a CSS px {x, y}, from stickyOffsetPx()) now is.
+  toCss(matrix, origin, postTranslation, sticky) {
     matrix = Array(16).fill().map((_,i) => matrix[Math.floor(i/4) + (i%4)*4]);
     var ox = (origin && origin[0]) || 0, oy = (origin && origin[1]) || 0, oz = (origin && origin[2]) || 0;
     var px = (postTranslation && postTranslation[0]) || 0, py = (postTranslation && postTranslation[1]) || 0;
+    var sx = (sticky && sticky.x) || 0, sy = (sticky && sticky.y) || 0;
     var parts = [];
     if (px + ox || py + oy || oz) parts.push(`translate3d(${px + ox}px, ${py + oy}px, ${oz}px)`);
+    if (sx || sy) parts.push(`translate(${sx}px, ${sy}px)`);
     var mat = 'matrix3d(' + matrix.join(',') + ')';
     if (mat !== 'matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)') parts.push(mat);
     if (ox || oy || oz) parts.push(`translate3d(${-ox}px, ${-oy}px, ${-oz}px)`);
     return parts.join(' ');
   }
 
+  // Recomputes and reapplies t.dom.style.transform, including its current
+  // sticky offset if it has one. The one place both a server commit
+  // (createDOMTransformNode) and a local scroll event (refreshStickyFor)
+  // need to update a node's CSS transform -- kept as one function so
+  // neither path can drift from what toCss() actually needs.
+  applyTransformCss(t) {
+    t.dom.style.transform = this.toCss(t.local, t.origin, t.post_translation, this.stickyOffsetPx(t));
+  }
+
+  // Port of cc::TransformTree::StickyPositionOffset (property_tree.cc),
+  // using PageStream.streamPropTrees's sticky_position_data (see
+  // GetPropertyTreesJSON/AddStickyPositionData, inspector_page_stream_
+  // agent.cc) for the constraint plus the LIVE local scroll position of
+  // the scroll ancestor -- not the server-reported one, which can be
+  // arbitrarily stale under real latency the instant local scroll has
+  // moved since the last commit (this reconstruction's entire premise is
+  // that local scroll never waits for a round trip -- see
+  // applyServerScroll's own header comment). The scroll ancestor's LIVE
+  // position is exactly its '.scroll' DOM box's own scrollLeft/scrollTop:
+  // that's how this reconstruction already implements scrolling (a real
+  // native scroll box), so nothing else needs to track it separately.
+  //
+  // Returns {x, y} in CSS px, rounded (cc rounds too, at the same point --
+  // see its own `roundf` right before returning). Also stashes
+  // totalStickyBoxOffset/totalContainingBlockOffset on node.sticky, the
+  // same accumulate-as-you-go values cc's own total_{sticky_box,
+  // containing_block}_sticky_offset are for nested sticky elements
+  // (nearestNodeShiftingStickyBox/nearestNodeShiftingContainingBlock)
+  // to build on -- recomputed fresh on every call rather than cached
+  // across calls: real pages rarely nest sticky elements more than one or
+  // two deep, so redoing that short ancestor chain every time is cheap,
+  // and it means there is no persistent cache to ever go stale after a
+  // scroll cc's own C++ version never has to reason about at all.
+  stickyOffsetPx(node) {
+    var s = node && node.sticky;
+    if (!s) return {x: 0, y: 0};
+
+    var scrollDom = s.scrollAncestor && s.scrollAncestor.transform_id && s.scrollAncestor.transform_id.dom;
+    var scrollX = scrollDom ? scrollDom.scrollLeft : 0;
+    var scrollY = scrollDom ? scrollDom.scrollTop : 0;
+
+    var c = s.constraintBoxRect || [0, 0, 0, 0];
+    var clipX = c[0] + scrollX, clipY = c[1] + scrollY, clipW = c[2], clipH = c[3];
+
+    var ancestorStickyBox = {x: 0, y: 0};
+    if (s.nearestNodeShiftingStickyBox) {
+      this.stickyOffsetPx(s.nearestNodeShiftingStickyBox);
+      ancestorStickyBox = s.nearestNodeShiftingStickyBox.sticky.totalStickyBoxOffset || ancestorStickyBox;
+    }
+    var ancestorContainingBlock = {x: 0, y: 0};
+    if (s.nearestNodeShiftingContainingBlock) {
+      this.stickyOffsetPx(s.nearestNodeShiftingContainingBlock);
+      ancestorContainingBlock = s.nearestNodeShiftingContainingBlock.sticky.totalContainingBlockOffset || ancestorContainingBlock;
+    }
+
+    var sb = s.scrollContainerRelativeStickyBoxRect || [0, 0, 0, 0];
+    var cb = s.scrollContainerRelativeContainingBlockRect || [0, 0, 0, 0];
+    var stickyBoxX = sb[0] + ancestorStickyBox.x + ancestorContainingBlock.x;
+    var stickyBoxY = sb[1] + ancestorStickyBox.y + ancestorContainingBlock.y;
+    var stickyBoxRight = stickyBoxX + sb[2], stickyBoxBottom = stickyBoxY + sb[3];
+    var containingX = cb[0] + ancestorContainingBlock.x;
+    var containingY = cb[1] + ancestorContainingBlock.y;
+    var containingRight = containingX + cb[2], containingBottom = containingY + cb[3];
+
+    // Order matches cc exactly: right/left/bottom/top, so a left offset
+    // can override a right one and top can override bottom on the same
+    // node, the same precedence StickyPositionOffset's own comment states.
+    var offX = 0, offY = 0;
+    if (s.isAnchoredRight) {
+      var rightLimit = (clipX + clipW) - s.rightOffset;
+      var rightDelta = Math.min(0, rightLimit - stickyBoxRight);
+      var rightAvailable = Math.min(0, containingX - stickyBoxX);
+      if (rightDelta < rightAvailable) rightDelta = rightAvailable;
+      offX += rightDelta;
+    }
+    if (s.isAnchoredLeft) {
+      var leftLimit = clipX + s.leftOffset;
+      var leftDelta = Math.max(0, leftLimit - stickyBoxX);
+      var leftAvailable = Math.max(0, containingRight - stickyBoxRight);
+      if (leftDelta > leftAvailable) leftDelta = leftAvailable;
+      offX += leftDelta;
+    }
+    if (s.isAnchoredBottom) {
+      var bottomLimit = (clipY + clipH) - s.bottomOffset;
+      var bottomDelta = Math.min(0, bottomLimit - stickyBoxBottom);
+      var bottomAvailable = Math.min(0, containingY - stickyBoxY);
+      if (bottomDelta < bottomAvailable) bottomDelta = bottomAvailable;
+      offY += bottomDelta;
+    }
+    if (s.isAnchoredTop) {
+      var topLimit = clipY + s.topOffset;
+      var topDelta = Math.max(0, topLimit - stickyBoxY);
+      var topAvailable = Math.max(0, containingBottom - stickyBoxBottom);
+      if (topDelta > topAvailable) topDelta = topAvailable;
+      offY += topDelta;
+    }
+
+    s.totalStickyBoxOffset = {x: ancestorStickyBox.x + offX, y: ancestorStickyBox.y + offY};
+    s.totalContainingBlockOffset = {
+      x: ancestorStickyBox.x + ancestorContainingBlock.x + offX,
+      y: ancestorStickyBox.y + ancestorContainingBlock.y + offY,
+    };
+
+    return {x: Math.round(offX), y: Math.round(offY)};
+  }
+
+  // Called whenever a '.scroll' box actually moves (scrollHandler) --
+  // finds every sticky transform node anchored to that scroll container
+  // and reapplies its CSS transform immediately, with no round trip.
+  // Linear scan over the (typically small) transform tree rather than a
+  // maintained scrollAncestor -> [stickyNodes] index: real pages rarely
+  // have more than a handful of sticky elements, and this only runs on an
+  // actual scroll event, not every frame.
+  refreshStickyFor(scrolledTransformNode) {
+    (this.sessionState.transform_tree || []).forEach(node => {
+      if (!node || !node.sticky) return;
+      if (node.sticky.scrollAncestor && node.sticky.scrollAncestor.transform_id === scrolledTransformNode && node.dom) {
+        this.applyTransformCss(node);
+      }
+    });
+  }
 
   makeTrees(propTrees) {
     var clip_tree = propTrees.clip_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
@@ -538,14 +817,51 @@ export class Session {
       l.transform_id = transform_tree[get_tree_node(l.transform_id)];
     });
 
+    // AddStickyPositionData (inspector_page_stream_agent.cc): keyed by
+    // transform node id (JSON keys are strings; get_tree_node's job above
+    // is for values that can arrive as either a raw id or an
+    // already-resolved node, which never applies to an object's own keys),
+    // one entry per transform node that has cc::StickyPositionConstraint
+    // data. Cross-references (scrollAncestor etc.) get resolved into
+    // actual node objects the same way every other tree here does, so
+    // stickyOffsetPx() never has to re-look-up an id itself. Absent
+    // (undefined) rather than {} only for property-tree JSON from before
+    // this field existed -- shouldn't happen live, but a PropTreeDiff.js
+    // patch is only ever applied against a tree this same client already
+    // parsed, so this can't come up post-connection either way; kept
+    // defensive regardless of how unreachable it currently is.
+    Object.keys(propTrees.sticky_position_data || {}).forEach(nodeIdStr => {
+      var node = transform_tree[parseInt(nodeIdStr, 10)];
+      if (!node) return;
+      var s = propTrees.sticky_position_data[nodeIdStr];
+      node.sticky = {
+        scrollAncestor: scroll_tree[s.scrollAncestor],
+        nearestNodeShiftingStickyBox: transform_tree[s.nearestNodeShiftingStickyBox],
+        nearestNodeShiftingContainingBlock: transform_tree[s.nearestNodeShiftingContainingBlock],
+        isAnchoredLeft: s.isAnchoredLeft, isAnchoredRight: s.isAnchoredRight,
+        isAnchoredTop: s.isAnchoredTop, isAnchoredBottom: s.isAnchoredBottom,
+        leftOffset: s.leftOffset, rightOffset: s.rightOffset,
+        topOffset: s.topOffset, bottomOffset: s.bottomOffset,
+        constraintBoxRect: s.constraintBoxRect,
+        scrollContainerRelativeStickyBoxRect: s.scrollContainerRelativeStickyBoxRect,
+        scrollContainerRelativeContainingBlockRect: s.scrollContainerRelativeContainingBlockRect,
+      };
+    });
+
     this.sessionState = {...this.sessionState, clip_tree, effect_tree, scroll_tree, transform_tree, layer_tree};
 
   }
   scheduleUpdateScreen() {
-    if (this.requestAnimationFrameCallback) cancelAnimationFrame(this.requestAnimationFrameCallback);
+    // Coalesce into the already-pending paint instead of postponing it.
+    // Tile updates can arrive continuously for several seconds; cancelling
+    // and replacing requestAnimationFrame on every update starved the
+    // callback until the stream finally went quiet (observed live as blank
+    // until ~8s and no final-resolution paint until ~14s).
+    if (this.requestAnimationFrameCallback) return;
     this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
   }
   updateScreen() {
+    this.requestAnimationFrameCallback = null;
     // updateScreen() only ever runs from a fresh 'PageStream.frameDone' (or
     // once, at initial domElement assignment, before any gesture could have
     // happened) -- so any call reaching here is proof a real server frame
@@ -590,7 +906,19 @@ export class Session {
 
         params.bufferUpdates.forEach(bufUpdate => {
           var domImage;
-          if (bufUpdate.image) {
+          if (bufUpdate.binaryImageId !== undefined) {
+            const src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
+            if (!src) {
+              console.error('PageStream: binary tile', bufUpdate.binaryImageId,
+                            'was not received before its metadata');
+              return;
+            }
+            domImage = new Image();
+            domImage.src = src;
+            domImage.decode();
+            domImage.sharable = true;
+            if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, src);
+          } else if (bufUpdate.image) {
             domImage = new Image();
             domImage.src = bufUpdate.image;
             domImage.decode();
@@ -785,12 +1113,57 @@ export class Session {
     // (not per scroll element -- a touch's eventual target isn't known
     // without hit-testing) as a second, coarser guard alongside it.
     this.sessionState.touchActive = (n === 'touchStart' || n === 'touchMove');
+    if (this.sessionState.touchActiveTimer)
+      clearTimeout(this.sessionState.touchActiveTimer);
+    this.sessionState.touchActiveTimer = null;
+    if (this.sessionState.touchActive) {
+      // A drag can leave the adopted root before touchend is dispatched to
+      // it. Never let that lost event permanently suppress server truth.
+      this.sessionState.touchActiveTimer = setTimeout(() => {
+        this.sessionState.touchActive = false;
+        this.sessionState.touchActiveTimer = null;
+      }, 2000);
+    }
     this.sessionState.lastTouchTime = Date.now();
+    this.trackGestureForTrace(n, e);
     this.handlePinchGesture(n, e);
     this.ws.req('Input.dispatchTouchEvent', {
       type: n,
       touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
     });
+  }
+
+  // Records single-finger drags as 'scroll' trace events (see
+  // interactionTrace.js / test/replayTrace.js), using the same {x, y, dy}
+  // shape test/scenarios.js's action DSL already uses -- x/y is the drag's
+  // start point, dy is signed so a finger moving up (content scrolling
+  // down) is positive, matching applyFrontendAction's own convention.
+  // Multi-touch (pinch) gestures are deliberately not recorded as scrolls;
+  // handlePinchGesture already covers that case separately, and a two-finger
+  // drag isn't something a coordinate-based scroll replay could reproduce
+  // anyway.
+  trackGestureForTrace(n, e) {
+    if (e.touches && e.touches.length >= 2) { this._traceGesture = null; return; }
+    if (n === 'touchStart') {
+      const t = e.touches[0];
+      this._traceGesture = t && {startX: t.clientX, startY: t.clientY, lastX: t.clientX, lastY: t.clientY};
+      return;
+    }
+    if (n === 'touchMove' && this._traceGesture) {
+      const t = e.touches[0];
+      if (t) { this._traceGesture.lastX = t.clientX; this._traceGesture.lastY = t.clientY; }
+      return;
+    }
+    if ((n === 'touchEnd' || n === 'touchCancel') && this._traceGesture) {
+      const g = this._traceGesture;
+      this._traceGesture = null;
+      const dy = g.startY - g.lastY;
+      const dx = g.lastX - g.startX;
+      // Below this, it's a tap (already recorded, if it landed on a link,
+      // by targetTouch's own 'click' trace event) rather than a scroll.
+      if (Math.abs(dy) < 10 && Math.abs(dx) < 10) return;
+      interactionTrace.record('scroll', {x: Math.round(g.startX), y: Math.round(g.startY), dy: Math.round(dy)});
+    }
   }
 
   // Scroll gets local prediction for free (native DOM scrolling on the '.scroll'

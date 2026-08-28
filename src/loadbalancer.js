@@ -1,4 +1,4 @@
-import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js'
+import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260825-earlyevents1'
 
 
 // Implements a stochastic client-side loadbalancer

@@ -3,6 +3,12 @@ import {selectWebsocket} from './loadbalancer.js?v=20260825-earlyevents1'
 import {Session} from './session.js?v=20260826-linkquads1'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
+// Kept in sync with SocketHandler.js's DEFAULT_WARM_URL (the server keeps
+// one Chromium instance permanently pre-navigated to this exact URL) --
+// this is what currentURL() falls back to below, and what the eager
+// compositor snapshot in init() is allowed to keep showing while that
+// default page loads.
+const DEFAULT_HOME_URL = 'https://briskbrowser.com/home';
 
 export class Browser {
   constructor(rootElement, options) {
@@ -14,9 +20,9 @@ export class Browser {
 
   async init() {
     // The eager compositor snapshot is intentionally specific to the default
-    // landing page. Never flash Wikipedia while loading an explicitly
+    // landing page. Never flash the homepage while loading an explicitly
     // requested URL; that request goes straight to the live PageStream path.
-    if (this.currentURL() !== 'https://en.wikipedia.org/wiki/Main_Page') {
+    if (this.currentURL() !== DEFAULT_HOME_URL) {
       const warmPreview = document.getElementById('warm-preview');
       if (warmPreview) warmPreview.remove();
     }
@@ -124,8 +130,10 @@ export class Browser {
     // targets until it crashes. Observed directly: visiting the bare root
     // produced hundreds of rapid connect/disconnect cycles in the server log
     // (the "flickering" symptom) before the tab gave out. A sensible,
-    // non-self-referential default instead.
-    return 'https://en.wikipedia.org/wiki/Main_Page';
+    // non-self-referential default instead: Brisk's own homepage, served at
+    // a distinct path (HttpHandler.js's /home) so it can never be this same
+    // frontend app and re-trigger the recursion.
+    return DEFAULT_HOME_URL;
   }
 
   frontendPathForURL(url) {

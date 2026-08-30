@@ -463,7 +463,13 @@ export class Session {
     if (!l.images || l.name == 'Frame Overlay Content Layer') return;
 
     // Huh - looks like a scrollingcontents layer.  If so, set everything up appropriately
-    if (l.clip_tree_index.transform_id === l.scroll_tree_index.transform_id.parent_id  &&
+    // `scroll_tree_index.transform_id` is resolved from the scroll tree's own
+    // node, not the layer's indices, so it can dangle even for a layer
+    // makeTrees() resolved fully (same staleness window described there).
+    // Reading `.parent_id` through it unguarded threw the identical
+    // "Cannot read properties of undefined" that aborted this whole loop.
+    if (l.scroll_tree_index.transform_id &&
+        l.clip_tree_index.transform_id === l.scroll_tree_index.transform_id.parent_id  &&
         l.scroll_tree_index.scrollable) {
       l.scroll_tree_index.transform_id.scroll = l.scroll_tree_index;
       l.scroll_tree_index.transform_id.clip = l.clip_tree_index;
@@ -793,11 +799,45 @@ export class Session {
       if (a === undefined) return a;
       return a.id;
     }
+    // A layer can outlive the property trees it was described against. The
+    // server only sends a layer's info when that layer itself changes, and
+    // only re-sends property trees when their serialization changes, so a
+    // navigation (or a promoted speculative fork taking over this session)
+    // can replace the whole tree set with a smaller one while layers from
+    // the previous page are still sitting in layer_tree with no matching
+    // `layerDeleted` ever having arrived for them. Observed live on
+    // https://en.wikipedia.org/wiki/Main_Page: frame 1 carried transform
+    // nodes 0-12 and layers 23-31 using nodes 7-12; frame 2 replaced the
+    // trees with nodes 0-6 and added layers 35-38, and no delete was ever
+    // sent for 23-31.
+    //
+    // Resolving those dangling indices in place stored `undefined` on the
+    // layer, which then reached createDOMLayerNode() ->
+    // createDOMTransformNode(undefined) and threw "Cannot read properties
+    // of undefined (reading 'parent_id')". That throw escaped the
+    // layer_tree.forEach in updateScreen(), so EVERY remaining layer --
+    // including every one that resolved perfectly well -- was skipped, and
+    // with them createTargetNode() and the entire click-target DOM. The
+    // user-visible result was a page that streamed tiles normally but had
+    // no `.link-hit-region` elements at all, i.e. no tappable links and no
+    // `.preloaded` highlighting, on roughly half of all page loads.
+    //
+    // Mark such a layer unresolved and leave its raw indices untouched
+    // rather than overwriting them with undefined: the ids are the only
+    // record of what the layer wanted, so keeping them lets it resolve
+    // normally if a later property-tree update reintroduces those nodes,
+    // and makes the condition non-destructive either way.
     layer_tree.forEach(l => {
-      l.clip_tree_index = clip_tree[get_tree_node(l.clip_tree_index)];
-      l.effect_tree_index = effect_tree[get_tree_node(l.effect_tree_index)];
-      l.scroll_tree_index = scroll_tree[get_tree_node(l.scroll_tree_index)];
-      l.transform_tree_index = transform_tree[get_tree_node(l.transform_tree_index)];
+      var clip = clip_tree[get_tree_node(l.clip_tree_index)];
+      var effect = effect_tree[get_tree_node(l.effect_tree_index)];
+      var scroll = scroll_tree[get_tree_node(l.scroll_tree_index)];
+      var transform = transform_tree[get_tree_node(l.transform_tree_index)];
+      l.unresolved = !clip || !effect || !scroll || !transform;
+      if (l.unresolved) return;
+      l.clip_tree_index = clip;
+      l.effect_tree_index = effect;
+      l.scroll_tree_index = scroll;
+      l.transform_tree_index = transform;
     });
     transform_tree.forEach(l => {
       l.parent_id = transform_tree[get_tree_node(l.parent_id)];
@@ -1073,6 +1113,20 @@ export class Session {
     
     // Create or adopt all layers, (and by extension scrolls, clips, transforms and targets)
     this.sessionState.layer_tree.forEach(l => {
+      // Stale layer left behind by a property-tree replacement (see
+      // makeTrees). It cannot be positioned -- its transform/clip/scroll/
+      // effect nodes are gone -- and whatever it is still painting is the
+      // previous page's content, so take its DOM (and its targets') down
+      // and leave the layer itself in place in case a later tree update
+      // brings its nodes back. Crucially this must not throw: everything
+      // after it in this loop, including every click target on the page,
+      // depends on the loop running to completion.
+      if (l.unresolved) {
+        l.dom && l.dom.remove();
+        l.targets && Object.keys(l.targets).forEach(
+            t => l.targets[t].dom && l.targets[t].dom.remove());
+        return;
+      }
       if (this.fullUpdateRequired)
         this.createDOMLayerNode(l);
       else

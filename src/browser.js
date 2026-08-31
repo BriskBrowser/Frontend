@@ -70,9 +70,35 @@ export class Browser {
     };
 
     socket.eventListeners['Target.attachedToTarget'] = msg => {
+      // Only a real page target is something this client can render, and
+      // 'Target.targetCreated' above has always agreed (`type == 'page'`) --
+      // but this handler did not, and it is the one that actually builds a
+      // Session, makes it the *active* one, and issues a Page.navigate.
+      //
+      // Chromium auto-attaches every dedicated/shared/service worker the page
+      // spawns, and those attaches come down this same socket. Each one used
+      // to create a brand-new empty Session, activate it (hiding the real
+      // page, which had already painted), and then send Page.navigate to a
+      // worker session -- where it does nothing at all, so the "page" the
+      // user is now looking at stays blank forever. Every worker the site
+      // creates repeats the cycle, which is the endlessly-churning
+      // window.sessions/never-renders failure seen on every Cloudflare
+      // Turnstile-protected site (its challenge runs in blob: workers) and on
+      // anything else worker-heavy: w3.org, github, crates.io, duckduckgo,
+      // hackernews/newest, the python/django/webpack docs, and so on. Pages
+      // with no workers (wikipedia) were unaffected, which is exactly why the
+      // failure looked site-specific rather than structural.
+      //
+      // Filtered client-side as well as in SocketHandler.browserEventHandler()
+      // (which no longer forwards non-page target attaches at all) because
+      // this handler's assumption is a client-side invariant in its own right
+      // -- addSession/sessionActivate/Page.navigate are only ever meaningful
+      // for a page.
+      if (!msg.targetInfo || msg.targetInfo.type !== 'page') return;
+
       // TODO:  Handle case of multiple targets/sessions/windows etc.
       console.log("new target", msg);
-      
+
       var sess = this.addSession(msg.sessionId, null);
       if (!sess) return;   // duplicate attach for a session we already have
       this.sessionActivate(msg.sessionId);
@@ -98,6 +124,10 @@ export class Browser {
     }
 
     socket.eventListeners['Target.targetInfoChanged'] = params => {
+      // Same reasoning as the attachedToTarget guard above: a worker target's
+      // info change is not the page's. Without this, a blob: worker's title
+      // ("blob:https://www.w3.org/<uuid>") became the tab title.
+      if (!params.targetInfo || params.targetInfo.type !== 'page') return;
       if (params.targetInfo.title) document.title = params.targetInfo.title;
       if (params.targetInfo.url && params.targetInfo.url.startsWith('http'))
         this.committedURLChanged(this.activeSession, params.targetInfo.url);

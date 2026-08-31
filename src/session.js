@@ -35,6 +35,7 @@ export class Session {
     }
 
     this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
+      this.resolveBinaryTiles(msg.layerUpdate);
       this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
       // Create any sessions for event target clicks, because they could start sending data right away.
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
@@ -119,6 +120,55 @@ export class Session {
       }
     };
 
+  }
+
+  // Turns every `binaryImageId` reference in a just-arrived layerUpdate into a
+  // plain, reusable `image` Blob URL, immediately, in WebSocket receive order.
+  //
+  // A binary tile is a ONE-SHOT ticket: SocketHandler.js sends the tile's
+  // bytes as a single binary WebSocket frame directly before the JSON
+  // metadata naming it, and devToolsWebsocket.takeBinaryImage() deletes the
+  // entry on the first read, so the id can only ever be redeemed once.
+  //
+  // This used to be redeemed lazily, in updateScreen(), which is far too late.
+  // A layerUpdate sits in sessionState.nextLayerUpdates until the next
+  // frameDone commits it, and in that window this session hands `this` to
+  // onNewSession() for every click target the same update carries -- and the
+  // Session constructor deep-clones the base session's whole sessionState,
+  // pending tile updates included. Each speculative session therefore
+  // inherited a copy of the same not-yet-redeemed ticket. Whichever session
+  // painted first redeemed it; every other one got undefined and logged
+  // "binary tile N was not received before its metadata" -- a badly misleading
+  // message, because the bytes had in fact arrived perfectly on time and in
+  // the right order. The affected tile was then simply dropped, leaving a
+  // hole in that session's page, and (because the bytes never reached
+  // tileStore under their content id) any later cross-session dedup reference
+  // to the same tile missed too: "tileId ... referenced but not in local
+  // tileStore".
+  //
+  // Redeeming here, exactly once, at the only point where "before its
+  // metadata" is a meaningful claim, makes the clone inherit real image bytes
+  // instead of a spent ticket, and restores the ordering guarantee the error
+  // message was written to check. Note this must run before the
+  // onNewSession() calls below it, not after.
+  resolveBinaryTiles(layerUpdate) {
+    var updates = layerUpdate && layerUpdate.bufferUpdates;
+    if (!updates) return;
+    updates.forEach(bufUpdate => {
+      if (bufUpdate.binaryImageId === undefined) return;
+      var src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
+      if (src === undefined) {
+        // Now a genuine transport-ordering violation (or a tile whose binary
+        // frame was addressed to a session that no longer exists), not the
+        // self-inflicted double-redeem this function exists to remove.
+        console.error('PageStream: binary tile', bufUpdate.binaryImageId,
+                      'was not received before its metadata');
+        delete bufUpdate.binaryImageId;
+        return;
+      }
+      delete bufUpdate.binaryImageId;
+      bufUpdate.image = src;
+    });
   }
 
   // Tiles arrive before frameDone, and a complex page can spend well over a
@@ -946,19 +996,11 @@ export class Session {
 
         params.bufferUpdates.forEach(bufUpdate => {
           var domImage;
-          if (bufUpdate.binaryImageId !== undefined) {
-            const src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
-            if (!src) {
-              console.error('PageStream: binary tile', bufUpdate.binaryImageId,
-                            'was not received before its metadata');
-              return;
-            }
-            domImage = new Image();
-            domImage.src = src;
-            domImage.decode();
-            domImage.sharable = true;
-            if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, src);
-          } else if (bufUpdate.image) {
+          // No binaryImageId branch here: resolveBinaryTiles() has already
+          // turned every one into a plain `image` Blob URL at receive time
+          // (see its comment -- redeeming the one-shot id this late is what
+          // made cloned speculative sessions fight over the same tile).
+          if (bufUpdate.image) {
             domImage = new Image();
             domImage.src = bufUpdate.image;
             domImage.decode();

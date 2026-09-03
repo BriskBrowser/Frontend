@@ -32,7 +32,7 @@ let options = {
 
 typeof BBOptionsOverrides !== 'undefined' && Object.assign(options, BBOptionsOverrides)
 
-import {Browser} from './browser.js?v=20260831-workertargets1'
+import {Browser} from './browser.js?v=20260901-tilecache1'
     
 window.addEventListener('DOMContentLoaded', async (event) => {
   let b = new Browser(document.querySelector('#browser'), options)

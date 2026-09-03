@@ -12,6 +12,134 @@ import {applyPropTreePatch} from './propTreePatch.js'
 // they can be reused instead of re-fetched. See docs/tile-transport.md.
 const tileStore = new Map();
 
+// Keys forwarded to the real page as genuine CDP key events (see
+// keyboardKeyHandler below) rather than through the value-mirroring
+// PageStream.setKeyboardState path. `code` is the Windows virtual-key code
+// Input.dispatchKeyEvent expects; `domCode` is the DOM UIEvents `code`
+// string; `text` is only set for keys that actually produce a character
+// (only Enter, here -- '\r'), since sending an empty-string char event for
+// a pure navigation key like an arrow would incorrectly signal "this key
+// types a character" to anything inspecting the dispatched event.
+const SPECIAL_KEY_CODES = {
+  Enter: {code: 13, domCode: 'Enter', text: '\r'},
+  Escape: {code: 27, domCode: 'Escape'},
+  ArrowLeft: {code: 37, domCode: 'ArrowLeft'},
+  ArrowUp: {code: 38, domCode: 'ArrowUp'},
+  ArrowRight: {code: 39, domCode: 'ArrowRight'},
+  ArrowDown: {code: 40, domCode: 'ArrowDown'},
+  Home: {code: 36, domCode: 'Home'},
+  End: {code: 35, domCode: 'End'},
+};
+
+// --- Tile region arithmetic -------------------------------------------------
+//
+// A BufferUpdate's raster is a *complete* re-raster of its clip rect of the
+// layer, not a diff of what changed inside it (verified live: the small
+// "16,39,133,20" stats-text update tile carries the card's own translucent
+// background at exactly the same alpha as the full-card tile underneath it,
+// not just the glyphs). That is what makes it legal to take the pixels
+// underneath a new tile away entirely -- see updateScreen()'s cull.
+
+function rectRight(r) { return r.x + r.width; }
+function rectBottom(r) { return r.y + r.height; }
+
+// Does `outer` completely cover `inner`?
+function rectContains(outer, inner) {
+  return inner.x >= outer.x && inner.y >= outer.y &&
+         rectRight(inner) <= rectRight(outer) && rectBottom(inner) <= rectBottom(outer);
+}
+
+// The overlapping part of two rects, or null if they don't overlap.
+function rectIntersect(a, b) {
+  var x = Math.max(a.x, b.x), y = Math.max(a.y, b.y);
+  var r = Math.min(rectRight(a), rectRight(b)), bt = Math.min(rectBottom(a), rectBottom(b));
+  if (r <= x || bt <= y) return null;
+  return {x: x, y: y, width: r - x, height: bt - y};
+}
+
+// `a` minus `b`, as up to four *disjoint* rects (top band, bottom band, then
+// left and right of the overlap between them). Disjointness is not a detail:
+// the clip-path built from these uses ordinary nonzero winding, so two hole
+// rects that overlapped each other would cancel back to "filled" and
+// resurrect the very pixels they were meant to erase.
+function rectSubtract(a, b) {
+  var overlap = rectIntersect(a, b);
+  if (!overlap) return [a];
+  var out = [];
+  if (overlap.y > a.y)
+    out.push({x: a.x, y: a.y, width: a.width, height: overlap.y - a.y});
+  if (rectBottom(overlap) < rectBottom(a))
+    out.push({x: a.x, y: rectBottom(overlap), width: a.width, height: rectBottom(a) - rectBottom(overlap)});
+  if (overlap.x > a.x)
+    out.push({x: a.x, y: overlap.y, width: overlap.x - a.x, height: overlap.height});
+  if (rectRight(overlap) < rectRight(a))
+    out.push({x: rectRight(overlap), y: overlap.y, width: rectRight(a) - rectRight(overlap), height: overlap.height});
+  return out;
+}
+
+// Glue back together hole rects that share a whole edge. Without this, a
+// region that repaints at a slowly-changing width (the stats page's CPU
+// progress bar walks 129px -> 139px and back, one pixel at a time) would add
+// a fresh one-pixel-wide sliver to the hole list on every single frame and
+// grow it without bound for as long as the page stays open.
+function coalesceRects(rects) {
+  for (var again = true; again; ) {
+    again = false;
+    outer:
+    for (var i = 0; i < rects.length; i++) {
+      for (var j = i + 1; j < rects.length; j++) {
+        var a = rects[i], b = rects[j], merged = null;
+        if (a.x === b.x && a.width === b.width &&
+            (rectBottom(a) === b.y || rectBottom(b) === a.y))
+          merged = {x: a.x, y: Math.min(a.y, b.y), width: a.width, height: a.height + b.height};
+        else if (a.y === b.y && a.height === b.height &&
+            (rectRight(a) === b.x || rectRight(b) === a.x))
+          merged = {x: Math.min(a.x, b.x), y: a.y, width: a.width + b.width, height: a.height};
+        if (merged) {
+          rects.splice(j, 1);
+          rects[i] = merged;
+          again = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return rects;
+}
+
+// Erase `hole` (in layer coordinates) from a tile entry. Returns true once
+// nothing of the tile is left visible, so the caller can drop it outright.
+function punchTileHole(entry, hole) {
+  entry.holes = entry.holes || [];
+  var pieces = [hole];
+  entry.holes.forEach(h => {
+    pieces = pieces.reduce((acc, p) => acc.concat(rectSubtract(p, h)), []);
+  });
+  if (pieces.length) {
+    entry.holes = coalesceRects(entry.holes.concat(pieces));
+    entry.holesChanged = true;
+  }
+  var covered = entry.holes.reduce((n, h) => n + h.width * h.height, 0);
+  return covered >= entry.clip.width * entry.clip.height;
+}
+
+// The tile's own rect with every hole cut out of it, in the element's local
+// (border-box) coordinates. Holes are wound the opposite way round from the
+// outer rect so plain nonzero winding drops them; that avoids depending on
+// path()'s optional `evenodd` argument being parsed, and is only correct
+// because punchTileHole() keeps the holes disjoint.
+function clipPathForTile(entry) {
+  if (!entry.holes || !entry.holes.length) return '';
+  var w = entry.clip.width, h = entry.clip.height;
+  var d = 'M0,0 L' + w + ',0 L' + w + ',' + h + ' L0,' + h + ' Z';
+  entry.holes.forEach(o => {
+    var x = o.x - entry.clip.x, y = o.y - entry.clip.y;
+    d += ' M' + x + ',' + y + ' L' + x + ',' + (y + o.height) +
+         ' L' + (x + o.width) + ',' + (y + o.height) + ' L' + (x + o.width) + ',' + y + ' Z';
+  });
+  return 'path("' + d + '")';
+}
+
 export class Session {
   // domElement can be null, in which case this session will be initialised when its set with the setter.
   constructor(ws, baseSession, options) {
@@ -155,19 +283,54 @@ export class Session {
     var updates = layerUpdate && layerUpdate.bufferUpdates;
     if (!updates) return;
     updates.forEach(bufUpdate => {
-      if (bufUpdate.binaryImageId === undefined) return;
-      var src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
-      if (src === undefined) {
-        // Now a genuine transport-ordering violation (or a tile whose binary
-        // frame was addressed to a session that no longer exists), not the
-        // self-inflicted double-redeem this function exists to remove.
-        console.error('PageStream: binary tile', bufUpdate.binaryImageId,
-                      'was not received before its metadata');
+      if (bufUpdate.binaryImageId !== undefined) {
+        var src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
+        if (src === undefined) {
+          // Now a genuine transport-ordering violation (or a tile whose binary
+          // frame was addressed to a session that no longer exists), not the
+          // self-inflicted double-redeem this function exists to remove.
+          console.error('PageStream: binary tile', bufUpdate.binaryImageId,
+                        'was not received before its metadata');
+          delete bufUpdate.binaryImageId;
+          return;
+        }
         delete bufUpdate.binaryImageId;
-        return;
+        bufUpdate.image = src;
       }
-      delete bufUpdate.binaryImageId;
-      bufUpdate.image = src;
+
+      // Real bug, found live: cache on RECEIPT, not on paint.
+      //
+      // updateScreen() also populates tileStore, but only for tiles it
+      // actually paints -- and that is strictly later, and strictly fewer
+      // tiles, than the set the server believes we hold. SocketHandler.js's
+      // dedupTileReferences() adds a tile to `forwardedTileIds` the instant
+      // it puts the bytes on the wire, and that Set is shared across every
+      // browser in the fork tree ("whichever fork's tile arrives first
+      // wins"). So the server's contract is "I sent you these bytes once,
+      // you have them forever".
+      //
+      // The client was breaking that contract for any tile received but
+      // never painted, and speculative execution makes that the common case:
+      // a fork rasters a tile, the server forwards the bytes to that fork's
+      // session and marks the id forwarded, the fork then loses the click
+      // race and is destroyed with its layerUpdates still sitting unpainted
+      // in nextLayerUpdates. The bytes are gone. When the winning fork later
+      // rasters the same furniture, the server strips the payload and sends
+      // the bare tileId -- and the client logs "tileId ... referenced but
+      // not in local tileStore (cache miss)" and drops the tile, leaving a
+      // stale or blank region.
+      //
+      // Measured against production, misses scaled with fork count exactly
+      // as that predicts: /home (1 session) 0 misses, example.com (2) 5,
+      // wikipedia (5) 10, bbc.com (5) many -- and bbc.com rendered visibly
+      // washed out because of the dropped tiles. Storing here, at the one
+      // point every tile's bytes are known to have arrived, makes the
+      // client's cache mirror `forwardedTileIds` exactly.
+      //
+      // Same Map, same content-addressed keys, so this is idempotent with
+      // updateScreen()'s own store: re-storing an identical id is a no-op.
+      if (bufUpdate.image && bufUpdate.tileId)
+        tileStore.set(bufUpdate.tileId, bufUpdate.image);
     });
   }
 
@@ -202,6 +365,7 @@ export class Session {
       this.keyboard = document.createElement('textarea');
       this.keyboard.style = "width: 0px; height: 0px; position: absolute; z-index: -999";
       this.keyboard.oninput = this.keyboardHandler.bind(this);
+      this.keyboard.onkeydown = this.keyboardKeyHandler.bind(this);
       this.keyboardUpdateBlockedCtr = 0;
 
       ele.appendChild(this.keyboard);
@@ -235,6 +399,62 @@ export class Session {
     });
 
     this.keyboardUpdateBlockedCtr--;
+  }
+
+  // PageStream.setKeyboardState only ever mirrors a text box's whole value
+  // and selection range (see the .pdl's own TODOs on that command) -- it has
+  // no notion of a semantic keypress, so Enter/arrow keys/Escape never reach
+  // the real page through it. A plain <textarea>'s 'input' event doesn't
+  // fire for these either: Enter's default action is inserting a literal
+  // '\n' into *this* shadow textarea's value (not "submit"), and moving the
+  // caret without changing text fires no 'input' event at all -- so before
+  // this handler existed, pressing Enter in a search box did nothing but
+  // pressing search on a real browser is one of the most basic things you'd
+  // expect to work, and arrow-key caret navigation silently no-op'd.
+  //
+  // Fixed by forwarding these as real CDP Input.dispatchKeyEvent calls
+  // (stock CDP, confirmed present in this build independent of the private
+  // fork/PageStream patch -- see SocketHandler.js's whitelist comment), in
+  // ADDITION to (not instead of) whatever this shadow textarea's own default
+  // action already does. Verified empirically against the compiled binary,
+  // including the interaction between the two paths:
+  //  - single-line <input>: a dispatched Enter correctly triggers the
+  //    field's native implicit form submission, and value stays clean even
+  //    though the shadow textarea's own default action still separately
+  //    inserts a local '\n' and mirrors it right after via the normal
+  //    'input' -> keyboardHandler -> setKeyboardState path (Blink's
+  //    SetComposition, like a real <input>.value setter, silently drops an
+  //    embedded newline that doesn't belong on a single-line field).
+  //  - dispatched ArrowLeft moves the real focused field's actual selection.
+  // An earlier version of this called preventDefault() on Enter to suppress
+  // that local '\n' -- don't reintroduce that: on a real multi-line
+  // <textarea> target it let the dispatched key event commit a real
+  // newline server-side, but then the next keystroke's setKeyboardState
+  // mirrored the shadow's now-newline-less value on top of it (full-replace
+  // composition, not an append) and silently erased it again. Leaving the
+  // shadow's own default action alone keeps its mirrored value matching
+  // what's really there either way.
+  async keyboardKeyHandler(e) {
+    var spec = SPECIAL_KEY_CODES[e.key];
+    if (!spec) return; // ordinary printable keys are already covered by 'input' -> keyboardHandler above.
+
+    this.keyboardUpdateBlockedCtr++;
+    try {
+      await this.ws.req('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode,
+        text: spec.text,
+      });
+      if (spec.text) {
+        await this.ws.req('Input.dispatchKeyEvent', {
+          type: 'char', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode, text: spec.text,
+        });
+      }
+      await this.ws.req('Input.dispatchKeyEvent', {
+        type: 'keyUp', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode,
+      });
+    } finally {
+      this.keyboardUpdateBlockedCtr--;
+    }
   }
 
   decodeLayerInfo(l) {
@@ -480,6 +700,17 @@ export class Session {
         i.dom.width = i.clip.width;
         i.dom.height = i.clip.height;
         i.dom.activeInLayer = l;
+        i.holesChanged = true;
+      }
+      // Cut out whatever a newer tile has since taken over (updateScreen's
+      // cull). Done here rather than at punch time for the same reason the
+      // positioning above is: i.dom can be shared with a cloned speculative
+      // session, and only the layer that currently owns it in the DOM may
+      // write to it -- the other session re-applies its own holes if and
+      // when it adopts the element (which flips activeInLayer above).
+      if (i.holesChanged && i.dom.activeInLayer == l) {
+        i.dom.style.clipPath = clipPathForTile(i);
+        i.holesChanged = false;
       }
     });
   }
@@ -1106,26 +1337,90 @@ export class Session {
           // actual replacement image; a cache miss now correctly leaves the
           // existing tile (and DOM) completely untouched.
           if (domImage) {
-            // Cull images this new image covers up (note - this test could cull more things)
+            // Real bug, found live (ghosting on briskbrowser.com's own "LIVE
+            // SERVER STATS" panel: "92.9" and "93.9" legible on top of each
+            // other, over a grey box that isn't in the page at all).
+            //
+            // Tiles are stacked as separate absolutely-positioned DOM
+            // elements, which composites them source-over. That is only
+            // equivalent to what the compositor does if each tile is opaque
+            // -- and these aren't. A layer that isn't contents_opaque rasters
+            // its translucent background into *every* tile: the stats cards
+            // are `rgba(255,255,255,0.05)`, so every tile covering one is
+            // alpha 13 everywhere except the glyphs. Stacking N of them
+            // therefore lightens the region to 1-0.95^N (the grey box: N was
+            // 12, so ~46% white) and leaves every older tile's opaque glyph
+            // pixels showing through at 95% (the ghost digits).
+            //
+            // The old test only dropped a tile the new one *completely*
+            // covered, which for this page is never:
+            //   - the full-card tile (0,0,176,85) is far bigger than the
+            //     text/bar damage rects that repaint inside it, so it keeps
+            //     its baked-in copy of the digits from page load forever;
+            //   - consecutive damage rects differ (the CPU bar's width walks
+            //     129px..139px as the number moves), so each one only mostly
+            //     covers the last and they pile up one per second.
+            // Static content never shows this only because it is rastered
+            // once and nothing ever overlaps it.
+            //
+            // Culling anything the new tile merely *touches* would be wrong
+            // in the other direction -- it would take the rest of the
+            // full-card tile down with it and punch a real hole in the page.
+            // What's actually correct is to remove exactly the overlap:
+            // subtract the new tile's rect from every tile beneath it, so
+            // each pixel is painted by exactly one tile (the newest to cover
+            // it), which is the compositor's own rule. That's safe because a
+            // BufferUpdate is a complete re-raster of its clip rect, not a
+            // diff -- see the tile region arithmetic at the top of this file.
             for (let i = l.images.length - 1; i >= 0; i--) {
-              if (l.images[i].clip.x >= bufUpdate.clip.x &&
-                l.images[i].clip.y >= bufUpdate.clip.y &&
-                l.images[i].clip.x + l.images[i].clip.width <= bufUpdate.clip.x + bufUpdate.clip.width &&
-                l.images[i].clip.y + l.images[i].clip.height <= bufUpdate.clip.y + bufUpdate.clip.height) {
-              l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
-              l.images.splice(i, 1);
+              var overlap = rectIntersect(l.images[i].clip, bufUpdate.clip);
+              if (!overlap) continue;
+              // Whole tile gone: drop it. Partly gone: keep it, minus the part
+              // the new tile now owns (punchTileHole reports back if that
+              // leaves nothing).
+              if (rectContains(bufUpdate.clip, l.images[i].clip) ||
+                  punchTileHole(l.images[i], overlap)) {
+                l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
+                l.images.splice(i, 1);
               }
             }
-            l.images.push({clip: bufUpdate.clip, dom: domImage});
+            l.images.push({clip: bufUpdate.clip, dom: domImage, holes: []});
           }
         });
       }
 
       if (params.targets) {
+        l.targets = l.targets || {};
         params.targets.forEach(t => {
           if (t.targetDeleted) {
-            var old_target = l.targets[t.backendNodeId]
-            old_target.dom && old_target.dom.remove();
+            // Real bug, found live against the deployed instance (repeating
+            // "Cannot read properties of undefined (reading 'dom')" on
+            // bbc.com): a targetDeleted for a backendNodeId this layer does
+            // not currently hold made `old_target` undefined, and the
+            // unguarded `.dom` dereference threw.
+            //
+            // That is not an exotic case, it's routine. Layers get deleted
+            // and re-created constantly on a busy page, and the top of this
+            // very loop re-creates a previously-deleted layer with a *fresh*
+            // empty `targets: {}` -- so any targetDeleted still in flight for
+            // a node that lived on the old incarnation (and equally, any
+            // duplicate delete) lands on an empty map and blew up.
+            //
+            // The throw is far more damaging than one missing removal. It
+            // escapes this forEach, so the rest of the committed layer
+            // updates for the frame never apply AND
+            // `comittedLayerUpdates = []` below never runs -- leaving the
+            // poisoned update in the queue to be replayed, and to throw
+            // again, on every subsequent frame. One stray delete therefore
+            // wedges rendering permanently rather than costing a single
+            // frame: exactly the "tiles stream in but the page never
+            // assembles" symptom observed.
+            //
+            // Same defensive contract as the cache-miss cull above and the
+            // `l.unresolved` teardown below ("Crucially this must not
+            // throw"): a delete for a target we don't have is simply a no-op.
+            var old_target = l.targets[t.backendNodeId];
+            old_target && old_target.dom && old_target.dom.remove();
             delete l.targets[t.backendNodeId];
           } else {
             l.targets[t.backendNodeId] = l.targets[t.backendNodeId] || {};

@@ -1,6 +1,6 @@
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260825-earlyevents1'
 import {selectWebsocket} from './loadbalancer.js?v=20260825-earlyevents1'
-import {Session} from './session.js?v=20260831-workertargets1'
+import {Session} from './session.js?v=20260901-tilecache1'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
 // Kept in sync with SocketHandler.js's DEFAULT_WARM_URL (the server keeps

@@ -103,7 +103,9 @@ export class Browser {
       if (!sess) return;   // duplicate attach for a session we already have
       this.sessionActivate(msg.sessionId);
 
-      sess.resize();
+      let dims = this.rootElement.getBoundingClientRect();
+      sess.resize(dims.width, dims.height, window.devicePixelRatio);
+
       sess.ws.req('Page.enable', {});
       // Proxy-only capability: SocketHandler strips binaryTiles before
       // forwarding this command to Chromium. Negotiated clients receive tile
@@ -140,7 +142,8 @@ export class Browser {
 
 
     var resize = () => {
-      Object.values(this.sessions).forEach(x => x.resize());
+      let dims = this.rootElement.getBoundingClientRect();
+      Object.values(this.sessions).forEach(x => x.resize(dims.width, dims.height, window.devicePixelRatio));
     }
     window.addEventListener('resize', resize);
   }

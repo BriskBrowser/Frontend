@@ -363,7 +363,7 @@ export class Session {
         ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
 
       this.keyboard = document.createElement('textarea');
-      this.keyboard.style = "width: 0px; height: 0px; position: absolute; z-index: -999";
+      this.keyboard.className = "keyboard";
       this.keyboard.oninput = this.keyboardHandler.bind(this);
       this.keyboard.onkeydown = this.keyboardKeyHandler.bind(this);
       this.keyboardUpdateBlockedCtr = 0;
@@ -805,9 +805,10 @@ export class Session {
     // We want to detect 'click' events, but have to use touch instead because
     // we'll need to cancel the global touch event touch if we detect a click, and the onclick() event
     // fires too late to do that.
-    if (type=='touchStart' && evt.touches.length==1) {
+    if (type=='pointerdown' && evt.isPrimary) {
+      evt.currentTarget.setPointerCapture(evt.pointerId)
       evt.currentTarget.metadata.touchStarted = true;
-    } else if (type=='touchEnd' && evt.currentTarget.metadata.touchStarted) {
+    } else if (type=='pointerup' && evt.currentTarget.metadata.touchStarted) {
       // Real bug, found live: this used to fire on sessionId alone --
       // SocketHandler.js sets that the instant a speculative fork exists,
       // well before its own pre-navigation (PageStream.clickNode) has
@@ -827,21 +828,22 @@ export class Session {
         // later canonicalisation continues to update the active address bar.
         this.onSessionActivate(evt.currentTarget.metadata.sessionId);
       }
-      // changedTouches (not touches, which is empty by touchend) gives the
-      // lifted finger's last known position -- the actual tap point, useful
-      // for replaying this exact click by coordinate later (see
-      // test/replayTrace.js).
-      const liftedTouch = evt.changedTouches && evt.changedTouches[0];
+      // A PointerEvent carries the lifted pointer's position directly on the
+      // event -- the actual tap point, useful for replaying this exact click
+      // by coordinate later (see test/replayTrace.js). (This used to dig it
+      // out of TouchEvent.changedTouches, which does not exist on a
+      // PointerEvent and would have recorded undefined for every click.)
       interactionTrace.record('click', {
-        x: liftedTouch ? Math.round(liftedTouch.clientX) : undefined,
-        y: liftedTouch ? Math.round(liftedTouch.clientY) : undefined,
+        x: Number.isFinite(evt.clientX) ? Math.round(evt.clientX) : undefined,
+        y: Number.isFinite(evt.clientY) ? Math.round(evt.clientY) : undefined,
         backendNodeId: evt.currentTarget.metadata.backendNodeId,
         linkText: evt.currentTarget.dataset.linkText || undefined,
       });
       this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
-      evt.cancel = true;
+      evt.preventDefault();
     } else {
       delete evt.currentTarget.metadata.touchStarted;
+      evt.currentTarget.releasePointerCapture(evt.pointerId) 
     }
   }
 
@@ -885,8 +887,13 @@ export class Session {
       region.dataset.linkText = automationText;
       region.dataset.linkQuad = quadIndex;
       region.setAttribute('aria-label', automationText || 'clickable target');
-      ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
-        region.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt), {passive: true}));
+      // Not {passive: true}: targetTouch() preventDefault()s a completed
+      // click so the global touch/scroll path doesn't also act on it, and a
+      // passive listener would silently drop that. Unlike touchstart/
+      // touchmove, a non-passive pointer listener costs nothing for scrolling
+      // -- scroll blocking for pointer events is governed by touch-action.
+      ['pointerdown', 'pointerup', 'pointercancel', 'pointermove'].forEach(evt =>
+        region.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt)));
       if (this.options.showLinkOverlay) {
         region.classList.add('link');
         region.classList.toggle('alive', !!t.sessionId);
@@ -1478,11 +1485,11 @@ export class Session {
     this.updateTargetHeights();
   }
 
-  resize() {
+  resize(width, height, dpr) {
     this.ws.req('Emulation.setDeviceMetricsOverride', {
-      height: window.innerHeight,
-      width: Math.floor(window.innerWidth),
-      deviceScaleFactor: window.devicePixelRatio,
+      height: Math.floor(height),
+      width: Math.floor(width),
+      deviceScaleFactor: dpr,
       mobile: true
     }); 
   }

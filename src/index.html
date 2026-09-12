@@ -5,8 +5,18 @@
   
   <!-- Comment trickery to drop this line when file is used as a lodash template for html-webpack-plugin <% /*-->
     <link rel="stylesheet" href="/style.css" type="text/css">
+    <!-- Every startup module, so a slow link fetches them in parallel instead
+         of one import level per round trip. URLs must match the imports
+         exactly (test/module_graph.mjs checks). -->
+    <link rel='modulepreload' href='/browser.js?v=20260912-perf1'>
+    <link rel='modulepreload' href='/session.js?v=20260912-perf1'>
+    <link rel='modulepreload' href='/devtoolswebsocket.js?v=20260912-perf1'>
+    <link rel='modulepreload' href='/loadbalancer.js?v=20260912-perf1'>
+    <link rel='modulepreload' href='/interactionTrace.js?v=20260827-trace1'>
     <link rel='modulepreload' href='/glyphcodec.js'>
-    <script src='/index.js?v=20260912-glyph1' type="module"></script>
+    <link rel='modulepreload' href='/deepclone.js'>
+    <link rel='modulepreload' href='/propTreePatch.js'>
+    <script src='/index.js?v=20260912-perf1' type="module"></script>
   <!-- */ %> -->
 
 </head>

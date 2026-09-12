@@ -1,6 +1,6 @@
-import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-glyph1'
-import {selectWebsocket} from './loadbalancer.js?v=20260912-glyph1'
-import {Session} from './session.js?v=20260912-glyph1'
+import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
+import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
+import {Session} from './session.js?v=20260912-perf1'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
 // Kept in sync with SocketHandler.js's DEFAULT_WARM_URL (the server keeps

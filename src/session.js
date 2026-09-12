@@ -169,6 +169,14 @@ export class Session {
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
         x.sessionId && this.onNewSession(x.sessionId, this)
       });
+      // The server posts a frame's viewport tiles first and its off-screen
+      // margin last, so paint tile-only updates as they arrive instead of
+      // holding the viewport until frameDone. Hidden speculative sessions and
+      // structural updates keep whole-frame commits.
+      const update = msg.layerUpdate;
+      if (this.domElement_ && update.bufferUpdates && !update.layerInfo &&
+          !update.layerDeleted && update.zIndex === undefined && !update.targets)
+        this.commitPendingUpdates();
     };
 
     // `this.lastPropertyTreesJSON` is the raw string form of whatever

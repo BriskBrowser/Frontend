@@ -1,6 +1,6 @@
-import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-vector1'
-import {selectWebsocket} from './loadbalancer.js?v=20260912-vector1'
-import {Session} from './session.js?v=20260912-vector1'
+import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-glyph1'
+import {selectWebsocket} from './loadbalancer.js?v=20260912-glyph1'
+import {Session} from './session.js?v=20260912-glyph1'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
 // Kept in sync with SocketHandler.js's DEFAULT_WARM_URL (the server keeps
@@ -113,6 +113,7 @@ export class Browser {
       // Base64 expansion/decoding in JSON.
       sess.ws.req('PageStream.enable', {
         fps: 0, targetBandwidth: 999999999, binaryTiles: true,
+        glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });
       interactionTrace.record('navigate', {url: this.currentURL()});

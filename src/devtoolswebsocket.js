@@ -1,3 +1,4 @@
+import './glyphcodec.js';
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
 export async function decodeVectorTile(bytes) {
@@ -29,6 +30,15 @@ export class devToolsWebsocket extends WebSocket {
     super(host + '/devtools/browser');
     this.binaryType = 'arraybuffer';
     this.binaryImages = new Map();
+    this.glyphDecoder = new globalThis.BriskGlyphCodec.Decoder();
+    this.streamClosed = false;
+    this.addEventListener('close', () => {
+      this.streamClosed = true;
+      for (const url of this.binaryImages.values()) URL.revokeObjectURL(url);
+      this.binaryImages.clear();
+      this.glyphDecoder = null;
+      this.receiveQueue.length = 0;
+    });
     this.nextid=0;
     this.callbacks = [];
     this.pendingEvents = Object.create(null);
@@ -48,6 +58,7 @@ export class devToolsWebsocket extends WebSocket {
     this.receiveQueue = [];
     this.receiving = false;
     this.addEventListener('message', evt => {
+      if (this.streamClosed) return;
       this.receiveQueue.push(evt.data);
       this.drainMessages();
     });
@@ -73,22 +84,28 @@ export class devToolsWebsocket extends WebSocket {
         const bytes = new Uint8Array(data);
         const view = new DataView(data);
         if (bytes.length < 9 || view.getUint32(0) !== 0x42524953) {
-          console.error('PageStream: invalid binary tile frame');
-          return;
+          throw Error('PageStream: invalid binary tile frame');
         }
         const id = view.getUint32(4);
         const mimeLength = bytes[8];
         if (bytes.length < 9 + mimeLength) {
-          console.error('PageStream: truncated binary tile frame');
-          return;
+          throw Error('PageStream: truncated binary tile frame');
         }
         const mime = new TextDecoder().decode(bytes.slice(9, 9 + mimeLength));
         const payload = bytes.slice(9 + mimeLength);
+        if (mime === 'application/x-brisk-glyphs-v1+gzip') {
+          return decodeVectorTile(payload).then(blob => blob.arrayBuffer()).then(buffer => {
+            if (!this.glyphDecoder) return; // socket closed during decompression
+            const svg = this.glyphDecoder.decode(new Uint8Array(buffer));
+            this.binaryImages.set(id, URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'})));
+          });
+        }
         if (mime === 'image/svg+xml+gzip') {
           // Metadata must not overtake asynchronous decompression. The
           // ordered receive queue below waits for this one tile, then runs
           // ordinary JSON and image messages synchronously again.
           return decodeVectorTile(payload).then(blob => {
+            if (this.streamClosed) return;
             this.binaryImages.set(id, URL.createObjectURL(blob));
           });
         }

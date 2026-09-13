@@ -171,11 +171,18 @@ export class Session {
       });
       // The server posts a frame's viewport tiles first and its off-screen
       // margin last, so paint tile-only updates as they arrive instead of
-      // holding the viewport until frameDone. Hidden speculative sessions and
-      // structural updates keep whole-frame commits.
+      // holding the viewport until frameDone. Committing early must never
+      // replace content already on screen with a mostly empty new layout:
+      // a navigation's frame carries its new layers and trees before their
+      // tiles, and painting those early blanked the viewport for ~100 ms. So
+      // a frame with structural changes paints early only into a session
+      // that shows nothing yet. Hidden speculative sessions stay whole-frame.
       const update = msg.layerUpdate;
-      if (this.domElement_ && update.bufferUpdates && !update.layerInfo &&
-          !update.layerDeleted && update.zIndex === undefined && !update.targets)
+      const structural = u => u.layerInfo || u.layerDeleted || u.zIndex !== undefined;
+      const pendingStructure = this.sessionState.nextProptrees ||
+        this.sessionState.nextLayerUpdates.some(structural);
+      if (this.domElement_ && update.bufferUpdates && !structural(update) &&
+          (!this.sessionState.comittedProptrees || !pendingStructure))
         this.commitPendingUpdates();
     };
 

@@ -1,13 +1,14 @@
+import './metadataCodec.js';
 import {TileStreamDecoder} from './tileStream.js';
 import './tileDelta.js';
 import {H264TileDecoder, Vp9TileDecoder} from './h264tiles.js';
 import './glyphcodec.js';
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
-export async function decodeVectorTile(bytes) {
+export async function decodeVectorTile(bytes, format = 'gzip') {
   const maximum = 16 * 1024 * 1024;
   if (bytes.byteLength > maximum) throw new Error('Vector tile exceeds compressed size limit');
-  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format)).getReader();
   const chunks = [];
   let size = 0;
   try {
@@ -30,7 +31,9 @@ export async function decodeVectorTile(bytes) {
 // Implements the chrome devtools protocol on top of a websocket.
 export class devToolsWebsocket extends WebSocket {
   constructor(host){
-    super(host + '/devtools/browser');
+    super(host + '/devtools/browser', globalThis.BriskMetadata.protocol);
+    this.metadataEncoder = new globalThis.BriskMetadata.Codec();
+    this.metadataDecoder = new globalThis.BriskMetadata.Codec();
     this.binaryType = 'arraybuffer';
     this.binaryImages = new Map();
     this.tileDelta = new globalThis.BriskTileDelta.Cache();
@@ -49,6 +52,8 @@ export class devToolsWebsocket extends WebSocket {
       if (this.h264Decoder) this.h264Decoder.close();
       if (this.vp9Decoder) this.vp9Decoder.close();
       this.binaryImages.clear();
+      this.metadataEncoder = null;
+      this.metadataDecoder = null;
       this.glyphDecoder = null;
       this.tileDelta = null;
       this.receiveQueue.length = 0;
@@ -96,6 +101,16 @@ export class devToolsWebsocket extends WebSocket {
   handleMessageData(data) {
       if (data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(data);
+        if (globalThis.BriskMetadata.isFrame(bytes)) {
+          if (bytes[4] === 0) return this.dispatchMessage(this.metadataDecoder.decode(bytes));
+          if (bytes[4] !== 2) throw Error('Unknown metadata compression');
+          return decodeVectorTile(bytes.subarray(5), 'deflate').then(blob => blob.arrayBuffer()).then(buffer => {
+            if (this.streamClosed) return;
+            const packet = new Uint8Array(5 + buffer.byteLength);
+            packet.set([66,82,77,49,0]); packet.set(new Uint8Array(buffer),5);
+            this.dispatchMessage(this.metadataDecoder.decode(packet));
+          });
+        }
         const view = new DataView(data);
         if (bytes.length < 9 || view.getUint32(0) !== 0x42524953) {
           throw Error('PageStream: invalid binary tile frame');
@@ -143,7 +158,9 @@ export class devToolsWebsocket extends WebSocket {
         this.binaryImages.set(id, URL.createObjectURL(blob));
         return;
       }
-      var d = JSON.parse(data);
+      return this.dispatchMessage(JSON.parse(data));
+  }
+  dispatchMessage(d) {
       if (d.method === 'PageStream.tileDictionaryReset') {
         this.tileDelta = new globalThis.BriskTileDelta.Cache();
         return;
@@ -171,12 +188,16 @@ export class devToolsWebsocket extends WebSocket {
   }
   req = (sessionId, method, params) => {
     return new Promise((resolve, reject) => {
-      this.send(JSON.stringify({
-        id: this.nextid,
-        method,
-        params,
-        sessionId,
-      }));
+      // Normalize optional fields exactly as the legacy JSON request did.
+      const request = JSON.stringify({id: this.nextid, method, params, sessionId});
+      try {
+        this.send(this.protocol === globalThis.BriskMetadata.protocol
+          ? this.metadataEncoder.encode(JSON.parse(request)) : request);
+      } catch (error) {
+        // Encoding advances dictionaries. A failed send cannot be skipped.
+        this.close(1002, 'Metadata send failed');
+        throw error;
+      }
       this.callbacks[this.nextid] = {resolve, reject}
       this.nextid++;
     });

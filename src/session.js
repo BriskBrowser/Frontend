@@ -195,7 +195,7 @@ export class Session {
     // here needs a patch target inherited from a prior session.
     this.ws.eventListeners['PageStream.streamPropTrees'] =  params => {
       this.lastPropertyTreesJSON = params.propertyTreesJSON;
-      this.sessionState.nextProptrees = JSON.parse(params.propertyTreesJSON);
+      this.sessionState.nextProptrees = params.propertyTrees || JSON.parse(params.propertyTreesJSON);
       this.fullUpdateRequired = true;
     };
 

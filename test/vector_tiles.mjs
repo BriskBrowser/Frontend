@@ -54,3 +54,17 @@ const third=new devToolsWebsocket('ws://close-during-decode');
 third.emit('message',{data:wire(1,new c.Encoder().encode(glyphSVG(0)).bytes)});
 third.emit('close');await new Promise(r=>setTimeout(r,30));assert.equal(third.binaryImages.size,0);
 console.log('PASS glyph vectors: asynchronous dictionary-before-reference ordering, sibling ID remapping and close cleanup');
+// Shared stream packets must also hold following metadata behind async decode.
+globalThis.TileStreamDecoder=class {async decode(){await new Promise(r=>setTimeout(r,5));return {decoded:true};}close(){}};
+const streamSocket=new devToolsWebsocket('ws://stream-test');
+const streamMime=Buffer.from('application/x-brisk-stream-v1'),streamHeader=Buffer.alloc(9+streamMime.length);
+streamHeader.writeUInt32BE(0x42524953);streamHeader.writeUInt32BE(7,4);streamHeader[8]=streamMime.length;streamMime.copy(streamHeader,9);
+const streamPacket=Buffer.concat([streamHeader,Buffer.from('fixture')]);let streamCanvas;
+streamSocket.eventListeners.tile=()=>streamCanvas=streamSocket.takeBinaryImage(7);
+streamSocket.emit('message',{data:streamPacket.buffer.slice(streamPacket.byteOffset,streamPacket.byteOffset+streamPacket.length)});
+streamSocket.emit('message',{data:JSON.stringify({method:'tile',params:{}})});
+assert.equal(streamCanvas,undefined);await new Promise(r=>setTimeout(r,30));assert.equal(streamCanvas.decoded,true);
+let reloads=0;const recovery=new Map();globalThis.sessionStorage={getItem:key=>recovery.get(key),setItem:(key,value)=>recovery.set(key,value)};globalThis.location={reload:()=>reloads++};
+streamSocket.tileStreamNegotiated=true;streamSocket.emit('close',{code:1011});assert.equal(reloads,1);assert.equal(recovery.get('briskTileStreamRecovery'),'1');
+const repeat=new devToolsWebsocket('ws://repeat');repeat.tileStreamNegotiated=true;repeat.emit('close',{code:1011});assert.equal(reloads,1,'recovery must not loop');
+console.log('PASS shared stream decode ordering and one-shot independent-tile recovery');

@@ -1,3 +1,4 @@
+import {TileStreamDecoder} from './tileStream.js';
 import './tileDelta.js';
 import {H264TileDecoder, Vp9TileDecoder} from './h264tiles.js';
 import './glyphcodec.js';
@@ -35,10 +36,16 @@ export class devToolsWebsocket extends WebSocket {
     this.tileDelta = new globalThis.BriskTileDelta.Cache();
     this.glyphDecoder = new globalThis.BriskGlyphCodec.Decoder();
     this.streamClosed = false;
-    this.addEventListener('close', () => {
+    this.addEventListener('close', event => {
+      // One automatic recovery on codec/base failure: a new connection starts
+      // with independent tiles, so no stale prediction history can survive.
+      if (this.tileStreamNegotiated && [1002,1011,1013].includes(event.code)) {
+        try {if (sessionStorage.getItem('briskTileStreamRecovery') !== '1') {sessionStorage.setItem('briskTileStreamRecovery','1');location.reload();}} catch (_) {}
+      }
       this.streamClosed = true;
       for (const source of this.binaryImages.values())
         if (typeof source === 'string') URL.revokeObjectURL(source);
+      if (this.tileStreamDecoder) this.tileStreamDecoder.close();
       if (this.h264Decoder) this.h264Decoder.close();
       if (this.vp9Decoder) this.vp9Decoder.close();
       this.binaryImages.clear();
@@ -100,6 +107,10 @@ export class devToolsWebsocket extends WebSocket {
         }
         const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.slice(9, 9 + mimeLength)), bytes.slice(9 + mimeLength));
         const mime = decoded.mime, payload = decoded.bytes;
+        if (mime === 'application/x-brisk-stream-v1') {
+          if (!this.tileStreamDecoder) this.tileStreamDecoder = new TileStreamDecoder();
+          return this.tileStreamDecoder.decode(payload).then(canvas => {if (!this.streamClosed) this.binaryImages.set(id, canvas);});
+        }
         if (mime === 'video/webm') {
           if (!this.vp9Decoder) this.vp9Decoder = new Vp9TileDecoder();
           return this.vp9Decoder.decode(payload).then(canvas => {

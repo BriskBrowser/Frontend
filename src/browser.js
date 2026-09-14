@@ -1,13 +1,10 @@
+import {supportsH264Tiles, supportsVp9Tiles} from './h264tiles.js';
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
 import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
 import {Session} from './session.js?v=20260912-perf1'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 
-// Kept in sync with SocketHandler.js's DEFAULT_WARM_URL (the server keeps
-// one Chromium instance permanently pre-navigated to this exact URL) --
-// this is what currentURL() falls back to below, and what the eager
-// compositor snapshot in init() is allowed to keep showing while that
-// default page loads.
+// Landing page for sessions without an explicitly requested URL.
 const DEFAULT_HOME_URL = 'https://briskbrowser.com/home';
 
 export class Browser {
@@ -19,15 +16,9 @@ export class Browser {
   }
 
   async init() {
-    // The eager compositor snapshot is intentionally specific to the default
-    // landing page. Never flash the homepage while loading an explicitly
-    // requested URL; that request goes straight to the live PageStream path.
-    if (this.currentURL() !== DEFAULT_HOME_URL) {
-      const warmPreview = document.getElementById('warm-preview');
-      if (warmPreview) warmPreview.remove();
-    }
-
     // get the websocket loading early in the page load.
+    const h264Supported = supportsH264Tiles();
+    const vp9Supported = supportsVp9Tiles();
     let wsPromise = selectWebsocket(this.options.websocketServer, this.options.websocketPool);
 
     var socket = this.socket = await wsPromise;
@@ -69,7 +60,7 @@ export class Browser {
       }
     };
 
-    socket.eventListeners['Target.attachedToTarget'] = msg => {
+    socket.eventListeners['Target.attachedToTarget'] = async msg => {
       // Only a real page target is something this client can render, and
       // 'Target.targetCreated' above has always agreed (`type == 'page'`) --
       // but this handler did not, and it is the one that actually builds a
@@ -111,8 +102,10 @@ export class Browser {
       // forwarding this command to Chromium. Negotiated clients receive tile
       // payloads as binary WebSocket frames and Blob URLs instead of paying
       // Base64 expansion/decoding in JSON.
+      const h264Tiles = await h264Supported;
+      const vp9Tiles = h264Tiles && vp9Supported;
       sess.ws.req('PageStream.enable', {
-        fps: 0, targetBandwidth: 999999999, binaryTiles: true,
+        fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });

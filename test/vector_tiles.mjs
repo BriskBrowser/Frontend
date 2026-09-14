@@ -7,8 +7,9 @@ class FakeSocket extends EventEmitter {
   close(code) {this.closed=code;}
 }
 globalThis.WebSocket=FakeSocket;
+globalThis.BriskTileDelta = (await import('../src/tileDelta.js')).default;
 globalThis.BriskGlyphCodec = (await import('../src/glyphcodec.js')).default;
-const source=Buffer.from(fs.readFileSync(new URL('../src/devtoolswebsocket.js',import.meta.url), 'utf8').replace("import './glyphcodec.js';", ''));
+const source=Buffer.from(fs.readFileSync(new URL('../src/devtoolswebsocket.js',import.meta.url), 'utf8').replace(/^import .*;$/gm, ''));
 const {devToolsWebsocket,decodeVectorTile}=await import('data:text/javascript;base64,'+source.toString('base64'));
 const svg='<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0L10 0L0 10Z"/></svg>';
 assert.equal(await (await decodeVectorTile(gzipSync(svg))).text(),svg);

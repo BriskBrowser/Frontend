@@ -1,3 +1,5 @@
+import './tileDelta.js';
+import {H264TileDecoder, Vp9TileDecoder} from './h264tiles.js';
 import './glyphcodec.js';
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
@@ -30,13 +32,18 @@ export class devToolsWebsocket extends WebSocket {
     super(host + '/devtools/browser');
     this.binaryType = 'arraybuffer';
     this.binaryImages = new Map();
+    this.tileDelta = new globalThis.BriskTileDelta.Cache();
     this.glyphDecoder = new globalThis.BriskGlyphCodec.Decoder();
     this.streamClosed = false;
     this.addEventListener('close', () => {
       this.streamClosed = true;
-      for (const url of this.binaryImages.values()) URL.revokeObjectURL(url);
+      for (const source of this.binaryImages.values())
+        if (typeof source === 'string') URL.revokeObjectURL(source);
+      if (this.h264Decoder) this.h264Decoder.close();
+      if (this.vp9Decoder) this.vp9Decoder.close();
       this.binaryImages.clear();
       this.glyphDecoder = null;
+      this.tileDelta = null;
       this.receiveQueue.length = 0;
     });
     this.nextid=0;
@@ -91,8 +98,20 @@ export class devToolsWebsocket extends WebSocket {
         if (bytes.length < 9 + mimeLength) {
           throw Error('PageStream: truncated binary tile frame');
         }
-        const mime = new TextDecoder().decode(bytes.slice(9, 9 + mimeLength));
-        const payload = bytes.slice(9 + mimeLength);
+        const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.slice(9, 9 + mimeLength)), bytes.slice(9 + mimeLength));
+        const mime = decoded.mime, payload = decoded.bytes;
+        if (mime === 'video/webm') {
+          if (!this.vp9Decoder) this.vp9Decoder = new Vp9TileDecoder();
+          return this.vp9Decoder.decode(payload).then(canvas => {
+            if (!this.streamClosed) this.binaryImages.set(id, canvas);
+          });
+        }
+        if (mime === 'video/h264') {
+          if (!this.h264Decoder) this.h264Decoder = new H264TileDecoder();
+          return this.h264Decoder.decode(payload).then(canvas => {
+            if (!this.streamClosed) this.binaryImages.set(id, canvas);
+          });
+        }
         if (mime === 'application/x-brisk-glyphs-v1+gzip') {
           return decodeVectorTile(payload).then(blob => blob.arrayBuffer()).then(buffer => {
             if (!this.glyphDecoder) return; // socket closed during decompression
@@ -114,6 +133,10 @@ export class devToolsWebsocket extends WebSocket {
         return;
       }
       var d = JSON.parse(data);
+      if (d.method === 'PageStream.tileDictionaryReset') {
+        this.tileDelta = new globalThis.BriskTileDelta.Cache();
+        return;
+      }
       if (this.callbacks[d.id]) {
         if (d.result)
           this.callbacks[d.id].resolve(d.result);

@@ -1,3 +1,4 @@
+import {tileElement} from './h264tiles.js';
 import {deepClone} from './deepclone.js'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 import {applyPropTreePatch} from './propTreePatch.js'
@@ -169,20 +170,17 @@ export class Session {
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
         x.sessionId && this.onNewSession(x.sessionId, this)
       });
-      // The server posts a frame's viewport tiles first and its off-screen
-      // margin last, so paint tile-only updates as they arrive instead of
-      // holding the viewport until frameDone. Committing early must never
-      // replace content already on screen with a mostly empty new layout:
-      // a navigation's frame carries its new layers and trees before their
-      // tiles, and painting those early blanked the viewport for ~100 ms. So
-      // a frame with structural changes paints early only into a session
-      // that shows nothing yet. Hidden speculative sessions stay whole-frame.
+      // A navigation's first frame may be just the masthead/background.
+      // While the document is loading, let later content tiles paint as they
+      // arrive even if the layout changed. Waiting for every offscreen tile
+      // before replacing that empty layout delayed BBC headlines by seconds.
+      // Once loading has settled, retain whole-frame structural updates.
       const update = msg.layerUpdate;
       const structural = u => u.layerInfo || u.layerDeleted || u.zIndex !== undefined;
       const pendingStructure = this.sessionState.nextProptrees ||
         this.sessionState.nextLayerUpdates.some(structural);
       if (this.domElement_ && update.bufferUpdates && !structural(update) &&
-          (!this.sessionState.comittedProptrees || !pendingStructure))
+          (!this.sessionState.comittedProptrees || !pendingStructure || !this.documentLoaded))
         this.commitPendingUpdates();
     };
 
@@ -217,6 +215,9 @@ export class Session {
       this.fullUpdateRequired = true;
     };
     
+    this.documentLoaded = false;
+    this.ws.eventListeners['Page.loadEventFired'] = () => {this.documentLoaded = true;};
+
     this.ws.eventListeners['PageStream.frameDone'] = () => {
       // Required by the protocol (browser_protocol.pdl: "Must be sent by
       // the client once per frameDone") but was never actually implemented
@@ -252,6 +253,7 @@ export class Session {
     this.ws.eventListeners['Page.frameNavigated'] = params => {
       // Child-frame navigations must not replace the browser's address.
       if (params.frame && !params.frame.parentId && params.frame.url) {
+        this.documentLoaded = false;
         this.currentURL = params.frame.url;
         this.onURLChange(this.currentURL);
       }
@@ -712,8 +714,9 @@ export class Session {
         i.dom.style.position = 'absolute';
         i.dom.style.top = i.clip.y + 'px';
         i.dom.style.left = i.clip.x + 'px';
-        i.dom.width = i.clip.width;
-        i.dom.height = i.clip.height;
+        // CSS scales the tile without resizing (and clearing) a decoded canvas.
+        i.dom.style.width = i.clip.width + 'px';
+        i.dom.style.height = i.clip.height + 'px';
         i.dom.activeInLayer = l;
         i.holesChanged = true;
       }
@@ -1254,9 +1257,7 @@ export class Session {
           // (see its comment -- redeeming the one-shot id this late is what
           // made cloned speculative sessions fight over the same tile).
           if (bufUpdate.image) {
-            domImage = new Image();
-            domImage.src = bufUpdate.image;
-            domImage.decode();
+            domImage = tileElement(bufUpdate.image);
             // Indicates this HTMLElement can be referenced from multiple sessions.
             domImage.sharable = true;
             if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, bufUpdate.image);
@@ -1279,14 +1280,13 @@ export class Session {
             // commitImage() for the full reasoning.
             var srcCachedSrc = tileStore.get(bufUpdate.srcTileId);
             if (srcCachedSrc) {
-              var srcImg = new Image();
-              srcImg.src = srcCachedSrc;
+              var srcImg = tileElement(srcCachedSrc);
               var canvas = document.createElement('canvas');
               canvas.width = bufUpdate.clip.width;
               canvas.height = bufUpdate.clip.height;
               var ctx = canvas.getContext('2d');
               var tileIdForCache = bufUpdate.tileId;
-              srcImg.decode().then(() => {
+              (srcImg.decode ? srcImg.decode() : Promise.resolve()).then(() => {
                 ctx.drawImage(srcImg, bufUpdate.dx, bufUpdate.dy, bufUpdate.rasterWidth, bufUpdate.rasterHeight,
                               0, 0, bufUpdate.clip.width, bufUpdate.clip.height);
                 // Cache the reconstructed result under this tile's own id
@@ -1308,9 +1308,7 @@ export class Session {
             // bytes under `tileId` (see tileStore's own comment above).
             var cachedSrc = tileStore.get(bufUpdate.tileId);
             if (cachedSrc) {
-              domImage = new Image();
-              domImage.src = cachedSrc;
-              domImage.decode();
+              domImage = tileElement(cachedSrc);
               domImage.sharable = true;
             } else {
               // A genuine cache miss: the server's residency model and this

@@ -57,6 +57,7 @@ export function selectWebsocket(websocketServer, websocketPool) {
         checkDone();
       };
       s.ws.onerror = (err) => {socketPool.doneCount++; socketPool.lasterr=err; checkDone()};
+      if (s.ws.readyState === WebSocket.OPEN) s.ws.onopen();
     });
   });
 }

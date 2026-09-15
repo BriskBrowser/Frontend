@@ -108,6 +108,8 @@ export class Browser {
       socket.tileStreamNegotiated = streamTiles;
       sess.bootstrapPreview = streamTiles;
       sess.ws.req('PageStream.enable', {
+        previewURL: this.currentURL(),
+        previewSeed: globalThis.briskPreview && globalThis.briskPreview.token,
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',

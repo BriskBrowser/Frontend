@@ -4,6 +4,13 @@ import {TileStreamDecoder} from './tileStream.js';
 // loss. Never reconstruct copies from the server's uncompressed source pixels.
 export class PatchAtlasDecoder {
   constructor() { this.images=new TileStreamDecoder(); this.refs=new Map(); this.next=0; this.bytes=0; }
+  seed(image) {
+    if(this.next || !image.width || !image.height || image.width*image.height>4*1024*1024)throw Error('Invalid startup seed');
+    const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;
+    canvas.getContext('2d').drawImage(image,0,0);canvas.sharable=true;
+    this.seeded=true;
+    this.refs.set(0,{canvas,quality:100});this.next=1;this.bytes=image.width*image.height*4;
+  }
   async decode(bytes) {
     if(this.closed || bytes.length<32)throw Error('Invalid patch atlas');
     const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);

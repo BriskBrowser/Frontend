@@ -34,7 +34,7 @@ typeof BBOptionsOverrides !== 'undefined' && Object.assign(options, BBOptionsOve
 
 import {Browser} from './browser.js?v=20260912-perf1'
     
-window.addEventListener('DOMContentLoaded', async (event) => {
+const start = async () => {
   let b = new Browser(document.querySelector('#browser'), options)
 
   // Real bugs, found by audit, fixed together: init() is async and does
@@ -56,4 +56,6 @@ window.addEventListener('DOMContentLoaded', async (event) => {
     const fallback = document.getElementById('error-fallback');
     if (fallback) fallback.style.display = '';
   });
-});
+};
+if(document.readyState === 'loading') window.addEventListener('DOMContentLoaded', start, {once:true});
+else start();

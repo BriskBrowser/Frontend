@@ -31,7 +31,20 @@ export async function decodeVectorTile(bytes, format = 'gzip') {
 // Implements the chrome devtools protocol on top of a websocket.
 export class devToolsWebsocket extends WebSocket {
   constructor(host){
-    super(host + '/devtools/browser', globalThis.BriskMetadata.protocol);
+    const early = globalThis.briskEarly;
+    const socket = early && early.ws.url.split('?')[0] === host.replace(/\/$/, '') + '/devtools/browser' && early.ws.readyState < 2 ? early.ws : new WebSocket(host + '/devtools/browser', globalThis.BriskMetadata.protocol);
+    Object.setPrototypeOf(socket, new.target.prototype);
+    socket.initialize();
+    if (early) {
+      early.ws.removeEventListener('message', early.capture);
+      if (socket === early.ws) {socket.receiveQueue.push(...early.messages);socket.drainMessages();}
+      else early.ws.close();
+      delete globalThis.briskEarly;
+    }
+    return socket;
+  }
+  initialize(){
+    this.req=this.req.bind(this);this.takeBinaryImage=this.takeBinaryImage.bind(this);
     this.metadataEncoder = new globalThis.BriskMetadata.Codec();
     this.metadataDecoder = new globalThis.BriskMetadata.Codec();
     this.binaryType = 'arraybuffer';
@@ -169,6 +182,16 @@ export class devToolsWebsocket extends WebSocket {
       return this.dispatchMessage(JSON.parse(data));
   }
   dispatchMessage(d) {
+      if(d.method === 'PageStream.seedAtlas') {
+        const p=globalThis.briskPreview;
+        if(!p || p.token!==d.params.token)throw Error('Missing startup seed');
+        return Promise.all([p.ready,import('/patchAtlas.js')]).then(([image,{PatchAtlasDecoder}])=>{
+          if(this.streamClosed)return;
+          if(this.patchAtlasDecoder)throw Error('Late startup seed');
+          this.patchAtlasDecoder=new PatchAtlasDecoder();
+          this.patchAtlasDecoder.seed(image);
+        });
+      }
       if (d.method === 'PageStream.tileDictionaryReset') {
         this.tileDelta = new globalThis.BriskTileDelta.Cache();
         return;
@@ -189,12 +212,12 @@ export class devToolsWebsocket extends WebSocket {
       }
       this.childSockets.forEach(x=>x.handleMessage(d));
   } 
-  takeBinaryImage = id => {
+  takeBinaryImage(id) {
     const src = this.binaryImages.get(id);
     this.binaryImages.delete(id);
     return src;
   }
-  req = (sessionId, method, params) => {
+  req(sessionId, method, params) {
     return new Promise((resolve, reject) => {
       // Normalize optional fields exactly as the legacy JSON request did.
       const request = JSON.stringify({id: this.nextid, method, params, sessionId});

@@ -7,6 +7,7 @@ class FakeSocket extends EventEmitter {
   close(code) {this.closed=code;}
 }
 globalThis.WebSocket=FakeSocket;
+globalThis.BriskMetadata = (await import('../src/metadataCodec.js')).default;
 globalThis.BriskTileDelta = (await import('../src/tileDelta.js')).default;
 globalThis.BriskGlyphCodec = (await import('../src/glyphcodec.js')).default;
 const source=Buffer.from(fs.readFileSync(new URL('../src/devtoolswebsocket.js',import.meta.url), 'utf8').replace(/^import .*;$/gm, ''));

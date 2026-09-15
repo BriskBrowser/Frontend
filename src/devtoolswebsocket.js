@@ -49,6 +49,7 @@ export class devToolsWebsocket extends WebSocket {
       for (const source of this.binaryImages.values())
         if (typeof source === 'string') URL.revokeObjectURL(source);
       if (this.tileStreamDecoder) this.tileStreamDecoder.close();
+      if (this.patchAtlasDecoder) this.patchAtlasDecoder.close();
       if (this.h264Decoder) this.h264Decoder.close();
       if (this.vp9Decoder) this.vp9Decoder.close();
       this.binaryImages.clear();
@@ -122,6 +123,13 @@ export class devToolsWebsocket extends WebSocket {
         }
         const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.slice(9, 9 + mimeLength)), bytes.slice(9 + mimeLength));
         const mime = decoded.mime, payload = decoded.bytes;
+        if (mime === 'application/x-brisk-patch-atlas-v1') {
+          return import('/patchAtlas.js').then(({PatchAtlasDecoder})=>{
+            if(this.streamClosed)return;
+            if(!this.patchAtlasDecoder)this.patchAtlasDecoder=new PatchAtlasDecoder();
+            return this.patchAtlasDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
+          });
+        }
         if (mime === 'application/x-brisk-stream-v1') {
           if (!this.tileStreamDecoder) this.tileStreamDecoder = new TileStreamDecoder();
           return this.tileStreamDecoder.decode(payload).then(canvas => {if (!this.streamClosed) this.binaryImages.set(id, canvas);});

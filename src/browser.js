@@ -106,9 +106,10 @@ export class Browser {
       const vp9Tiles = h264Tiles && vp9Supported;
       const streamTiles = h264Tiles && vp9Tiles && typeof DecompressionStream === 'function' && localStorage.getItem('briskTileStream') !== '0' && sessionStorage.getItem('briskTileStreamRecovery') !== '1';
       socket.tileStreamNegotiated = streamTiles;
+      sess.bootstrapPreview = streamTiles;
       sess.ws.req('PageStream.enable', {
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
-        streamTiles,
+        streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });

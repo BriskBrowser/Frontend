@@ -163,7 +163,29 @@ export class Session {
       this.sessionState = deepClone(baseSession.sessionState);
     }
 
+    this.previewGeneration = 0;
+    this.ws.eventListeners['PageStream.frameStart'] = () => {this.previewFrameHasLayers=false;};
+    this.ws.eventListeners['PageStream.preview'] = msg => {
+      const source=msg.binaryImageId===undefined?msg.image:this.ws.ws.takeBinaryImage(msg.binaryImageId);
+      const generation=++this.previewGeneration;
+      import('/compactPreview.js').then(({CompactPreview})=>{
+        if(generation!==this.previewGeneration){if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);return;}
+        if(!this.compactPreview)this.compactPreview=new CompactPreview();
+        return this.compactPreview.set(msg,source,this.domElement_).then(()=>{
+          if(this.bootstrapPreview&&generation===this.previewGeneration){
+            this.bootstrapPreview=false;
+            return this.ws.req('PageStream.enable',{previewOnly:false,bytesPerFrame:999999999})
+              .then(()=>this.ws.req('PageStream.flush',{}));
+          }
+        });
+      }).catch(error=>{
+        console.error('PageStream: invalid compact preview',error);
+        this.ws.ws.close(1002,'Invalid compact preview');
+      });
+    };
+
     this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
+      this.previewFrameHasLayers = true;
       this.resolveBinaryTiles(msg.layerUpdate);
       this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
       // Create any sessions for event target clicks, because they could start sending data right away.
@@ -229,6 +251,7 @@ export class Session {
       // bookkeeping below, so the server sees it as promptly as possible.
       this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
+      if(this.previewFrameHasLayers){this.bootstrapPreview=false;this.clearCompactPreview();}
     };
 
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {
@@ -375,6 +398,7 @@ export class Session {
     this.domElement_ &&  this.domElement_.remove();
 
     this.domElement_ = ele;
+    if(this.compactPreview)this.compactPreview.attach(ele);
     if (ele) {
       ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
         ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
@@ -1604,7 +1628,10 @@ export class Session {
     }
   }
 
+  clearCompactPreview(){++this.previewGeneration;if(this.compactPreview)this.compactPreview.clear();}
+
   destroy() {
+    this.clearCompactPreview();
     this.ws.destroy();
     this.domElement = null;
   }

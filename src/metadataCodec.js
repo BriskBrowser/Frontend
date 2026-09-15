@@ -101,5 +101,5 @@
   function isFrame(b) { return b.length>=5 && MAGIC.every((x,i)=>b[i]===x); }
   const api={Codec,isFrame,LIMIT,protocol:'brisk-binary-v1'};
   if (typeof module !== 'undefined' && module.exports) module.exports=api;
-  else root.BriskMetadata=api;
+  root.BriskMetadata=api;
 })(globalThis);

@@ -23,10 +23,6 @@ export class Browser {
 
     var socket = this.socket = await wsPromise;
 
-    if (!window.navigator.userAgent.match(/Chrome\/[.0-9]* Mobile/)) {
-      alert("Hold Up!  We only support Android Chrome right now...   Click OK to try anyway...   But it probably won't work :-(")
-    }
-
     window.sessions = this.sessions;  // for testing
     // The outer browser's address/history is the thin client's navigation
     // UI. Store the represented server-side URL in every entry so native

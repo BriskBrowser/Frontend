@@ -289,6 +289,7 @@ export class Session {
     this.ws.eventListeners['Page.frameNavigated'] = params => {
       // Child-frame navigations must not replace the browser's address.
       if (params.frame && !params.frame.parentId && params.frame.url) {
+        this.desktopInput?.reset();
         this.targetStatuses.clear();
         this.documentLoaded = false;
         this.currentURL = params.frame.url;
@@ -408,6 +409,8 @@ export class Session {
 
   // Element ele is adopted by this Session.  It will be removed if a new element is bound.
   set domElement(ele) {
+    this.desktopInput?.destroy();
+    this.desktopInput = null;
     // get rid of old element
     this.domElement_ &&  this.domElement_.remove();
 
@@ -425,6 +428,13 @@ export class Session {
 
       ele.appendChild(this.keyboard);
       this.updateKeyboard();
+      const installDesktop = () => import('/desktopInput.js').then(({DesktopInput}) => {
+        if (this.domElement_ === ele && !this.desktopInput) this.desktopInput = new DesktopInput(this, ele);
+      }).catch(error => console.error('Desktop input failed', error));
+      if (globalThis.matchMedia?.('(any-pointer: fine)').matches) installDesktop();
+      else ele.addEventListener('pointerover', event => {
+        if (event.pointerType === 'mouse') installDesktop();
+      }, {passive:true});
     }
 
     this.updateScreen();
@@ -433,7 +443,7 @@ export class Session {
   updateKeyboard() {
     if (this.keyboard && !this.keyboardUpdateBlockedCtr) {
       var params = this.sessionState.keyboard;
-      this.keyboard.innerText = params.inputBoxValue;
+      this.keyboard.value = params.inputBoxValue || '';
       this.keyboard.setSelectionRange(params.selectionStart, params.selectionEnd);
       if (params.showing) {
         this.keyboard.focus();
@@ -447,13 +457,15 @@ export class Session {
   async keyboardHandler(e) {
     this.keyboardUpdateBlockedCtr++;
 
-    await this.ws.req("PageStream.setKeyboardState", {
-      inputBoxValue: e.target.value,
-      selectionStart: e.target.selectionStart,
-      selectionEnd: e.target.selectionEnd
-    });
-
-    this.keyboardUpdateBlockedCtr--;
+    try {
+      await this.ws.req("PageStream.setKeyboardState", {
+        inputBoxValue: e.target.value,
+        selectionStart: e.target.selectionStart,
+        selectionEnd: e.target.selectionEnd
+      });
+    } finally {
+      this.keyboardUpdateBlockedCtr--;
+    }
   }
 
   // PageStream.setKeyboardState only ever mirrors a text box's whole value
@@ -492,20 +504,22 @@ export class Session {
   async keyboardKeyHandler(e) {
     var spec = SPECIAL_KEY_CODES[e.key];
     if (!spec) return; // ordinary printable keys are already covered by 'input' -> keyboardHandler above.
+    const modifiers = (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 
     this.keyboardUpdateBlockedCtr++;
     try {
       await this.ws.req('Input.dispatchKeyEvent', {
         type: 'rawKeyDown', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode,
         text: spec.text,
+        modifiers,
       });
       if (spec.text) {
         await this.ws.req('Input.dispatchKeyEvent', {
-          type: 'char', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode, text: spec.text,
+          type: 'char', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode, text: spec.text, modifiers,
         });
       }
       await this.ws.req('Input.dispatchKeyEvent', {
-        type: 'keyUp', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode,
+        type: 'keyUp', windowsVirtualKeyCode: spec.code, key: e.key, code: spec.domCode, modifiers,
       });
     } finally {
       this.keyboardUpdateBlockedCtr--;
@@ -862,6 +876,7 @@ export class Session {
   }
 
   targetTouch(type, evt) {
+    if (evt.pointerType === 'mouse') return;
     // We want to detect 'click' events, but have to use touch instead because
     // we'll need to cancel the global touch event touch if we detect a click, and the onclick() event
     // fires too late to do that.
@@ -1589,7 +1604,7 @@ export class Session {
       height: Math.floor(height),
       width: Math.floor(width),
       deviceScaleFactor: dpr,
-      mobile: true
+      mobile: !globalThis.matchMedia?.('(any-pointer: fine)').matches
     }); 
   }
 

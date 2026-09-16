@@ -415,6 +415,10 @@ export class Session {
     this.domElement_ &&  this.domElement_.remove();
 
     this.domElement_ = ele;
+    // Forks inherit decoded state, but deepClone deliberately drops layer
+    // DOM. A preview-only fork may receive no new property trees before it
+    // is promoted, so adoption must rebuild that state into the new root.
+    if (ele) this.fullUpdateRequired = true;
     if(this.compactPreview)this.compactPreview.attach(ele);
     if (ele) {
       ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
@@ -884,6 +888,12 @@ export class Session {
       evt.currentTarget.setPointerCapture(evt.pointerId)
       evt.currentTarget.metadata.touchStarted = true;
     } else if (type=='pointerup' && evt.currentTarget.metadata.touchStarted) {
+      delete evt.currentTarget.metadata.touchStarted;
+      // The root already forwarded touchStart. clickNode is the complete
+      // action; ending that touch as well synthesizes a second origin click,
+      // possibly on a different page after navigation. Cancel it first.
+      this.touch('touchCancel', {touches: []});
+      this.suppressTouchEnd = true;
       // Real bug, found live: this used to fire on sessionId alone --
       // SocketHandler.js sets that the instant a speculative fork exists,
       // well before its own pre-navigation (PageStream.clickNode) has
@@ -1609,6 +1619,11 @@ export class Session {
   }
 
   touch(n, e){
+    if (n === 'touchStart') this.suppressTouchEnd = false;
+    if (n === 'touchEnd' && this.suppressTouchEnd) {
+      this.suppressTouchEnd = false;
+      return;
+    }
     if (e.cancel) {
       n = 'touchCancel';
     }

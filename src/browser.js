@@ -13,6 +13,7 @@ export class Browser {
     this.options = options;
     this.sessions = {};
     this.historyTraversal = false;
+    this.historyIndex = 0;
   }
 
   async init() {
@@ -27,19 +28,23 @@ export class Browser {
     // The outer browser's address/history is the thin client's navigation
     // UI. Store the represented server-side URL in every entry so native
     // back and forward buttons can drive the active remote page.
-    history.replaceState({briskURL: this.currentURL()}, '',
+    this.historyIndex = history.state?.briskIndex || 0;
+    history.replaceState({briskURL: this.currentURL(), briskIndex: this.historyIndex}, '',
         this.frontendPathForURL(this.currentURL()));
     window.addEventListener('popstate', event => {
       const url = event.state && event.state.briskURL || this.currentURL();
       const session = this.sessions[this.activeSession];
       if (!session || !url) return;
       this.historyTraversal = true;
+      const index = event.state && event.state.briskIndex;
+      const direction = Number.isInteger(index) ? Math.sign(index - this.historyIndex) : 0;
+      if (Number.isInteger(index)) this.historyIndex = index;
       // Covers both back and forward (popstate doesn't distinguish them),
       // but 'back' is overwhelmingly the real-world case (mobile back
       // button/edge-swipe) and the destination url is what replay actually
       // needs, so a single event type is enough here.
       interactionTrace.record('back', {url});
-      session.ws.req('PageStream.navigateHistory', {url}).catch(error => {
+      session.ws.req('PageStream.navigateHistory', {url, direction}).catch(error => {
         this.historyTraversal = false;
         console.error('History navigation failed:', error);
       });
@@ -90,6 +95,7 @@ export class Browser {
 
       var sess = this.addSession(msg.sessionId, null);
       if (!sess) return;   // duplicate attach for a session we already have
+      sess.targetId = msg.targetInfo.targetId;
       this.sessionActivate(msg.sessionId);
 
       let dims = this.rootElement.getBoundingClientRect();
@@ -133,9 +139,11 @@ export class Browser {
       // info change is not the page's. Without this, a blob: worker's title
       // ("blob:https://www.w3.org/<uuid>") became the tab title.
       if (!params.targetInfo || params.targetInfo.type !== 'page') return;
+      const active = this.sessions[this.activeSession];
+      if (!active || params.targetInfo.targetId !== active.targetId) return;
       if (params.targetInfo.title) document.title = params.targetInfo.title;
-      if (params.targetInfo.url && params.targetInfo.url.startsWith('http'))
-        this.committedURLChanged(this.activeSession, params.targetInfo.url);
+      // Frame events on the active session own navigation history. Target
+      // discovery also reports popups and can arrive after a later commit.
     };
 
     // Enabling discovery can synchronously produce targetCreated on a fast
@@ -184,7 +192,8 @@ export class Browser {
       return;
     }
     const method = this.historyTraversal ? 'replaceState' : 'pushState';
-    history[method]({briskURL: url}, '', this.frontendPathForURL(url));
+    if (!this.historyTraversal) this.historyIndex++;
+    history[method]({briskURL: url, briskIndex: this.historyIndex}, '', this.frontendPathForURL(url));
     this.historyTraversal = false;
   }
 
@@ -247,6 +256,7 @@ export class Browser {
     var ws = new devToolsSession(this.socket, sessionId);
 
     var sess = new Session(ws, existingSession, this.options);
+    sess.targetId = existingSession && existingSession.targetId;
     this.sessions[sessionId] = sess;
 
     

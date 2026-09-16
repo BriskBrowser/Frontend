@@ -38,7 +38,7 @@ export class devToolsWebsocket extends WebSocket {
     socket.initialize();
     if (early) {
       early.ws.removeEventListener('message', early.capture);
-      if (socket === early.ws) {socket.receiveQueue.push(...early.messages);socket.drainMessages();}
+      if (socket === early.ws) {socket.initialViewport=early.viewport;socket.receiveQueue.push(...early.messages);socket.drainMessages();}
       else early.ws.close();
       delete globalThis.briskEarly;
     }

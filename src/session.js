@@ -163,6 +163,7 @@ export class Session {
       this.sessionState = deepClone(baseSession.sessionState);
     }
 
+    this.ws.eventListeners['PageStream.startupMode']=params=>{this.bootstrapPreview=!params.serverUpgrade;};
     this.previewGeneration = 0;
     this.ws.eventListeners['PageStream.frameStart'] = () => {this.previewFrameHasLayers=false;};
     this.ws.eventListeners['PageStream.preview'] = msg => {
@@ -182,6 +183,20 @@ export class Session {
         console.error('PageStream: invalid compact preview',error);
         this.ws.ws.close(4002,'Invalid compact preview');
       });
+    };
+
+    this.targetStatuses=new Map();
+    this.ws.eventListeners['PageStream.targetStatus']=({layerUpdate})=>{
+      // Readiness is control metadata, not a renderer frame boundary. Updating
+      // it must never commit an unrelated structural frame halfway through.
+      for(const status of layerUpdate.targets||[]){
+        if(status.sessionId)this.onNewSession(status.sessionId,this);
+        this.targetStatuses.set(layerUpdate.layerId+':'+status.backendNodeId,status);
+        if(this.targetStatuses.size>2048)this.targetStatuses.delete(this.targetStatuses.keys().next().value);
+        const layer=this.sessionState.layer_tree[layerUpdate.layerId];
+        const target=layer?.targets?.[status.backendNodeId];
+        if(target){Object.assign(target,status);if(layer.dom&&!layer.unresolved)this.createTargetNode(target,layer);}
+      }
     };
 
     this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
@@ -236,7 +251,9 @@ export class Session {
       this.fullUpdateRequired = true;
     };
     
-    this.ws.eventListeners['PageStream.frameDone'] = () => {
+    this.ws.eventListeners['PageStream.frameDone'] = (params={}) => {
+      this.lastBriskFrame=params;
+      if(params.briskFrame)this.ws.req('PageStream.clientReady',{frame:params.briskFrame,generation:params.briskGeneration,interactive:!!this.previewFrameHasLayers});
       // Required by the protocol (browser_protocol.pdl: "Must be sent by
       // the client once per frameDone") but was never actually implemented
       // client-side -- previously harmless because nothing server-side
@@ -245,7 +262,7 @@ export class Session {
       // ack, so a missing ackFrame would stall the connection after one
       // frame. Sent first, before the (synchronous but non-trivial)
       // bookkeeping below, so the server sees it as promptly as possible.
-      this.ws.req('PageStream.ackFrame', {});
+      if(!params.briskMetadataOnly)this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
       if (this.previewFrameHasLayers) this.clearPreviewAfterPaint = true;
     };
@@ -272,6 +289,7 @@ export class Session {
     this.ws.eventListeners['Page.frameNavigated'] = params => {
       // Child-frame navigations must not replace the browser's address.
       if (params.frame && !params.frame.parentId && params.frame.url) {
+        this.targetStatuses.clear();
         this.documentLoaded = false;
         this.currentURL = params.frame.url;
         this.onURLChange(this.currentURL);
@@ -868,7 +886,10 @@ export class Session {
         // Page.frameNavigated/navigatedWithinDocument events. Promote that
         // session as-is; sessionActivate publishes its currentURL, and any
         // later canonicalisation continues to update the active address bar.
+        performance.mark('brisk:promotion-start');
+        const interactive=!!evt.currentTarget.metadata.inputReady;
         this.onSessionActivate(evt.currentTarget.metadata.sessionId);
+        requestAnimationFrame(()=>requestAnimationFrame(()=>performance.mark('brisk:promotion-presented',{detail:{interactive}})));
       }
       // A PointerEvent carries the lifted pointer's position directly on the
       // event -- the actual tap point, useful for replaying this exact click
@@ -1487,7 +1508,7 @@ export class Session {
             delete l.targets[t.backendNodeId];
           } else {
             l.targets[t.backendNodeId] = l.targets[t.backendNodeId] || {};
-            Object.assign(l.targets[t.backendNodeId], t);
+            Object.assign(l.targets[t.backendNodeId], t, this.targetStatuses.get(params.layerId+':'+t.backendNodeId));
           }
         });
       };
@@ -1545,6 +1566,11 @@ export class Session {
       this.clearPreviewAfterPaint = false;
       this.bootstrapPreview = false;
       this.clearCompactPreview();
+      performance.mark('brisk:interactive-committed');
+      requestAnimationFrame(()=>requestAnimationFrame(()=>{
+        performance.mark('brisk:interactive-presented');
+        globalThis.dispatchEvent(new CustomEvent('brisk:interactive',{detail:{sessionId:this.ws.sessionId,frame:this.lastBriskFrame?.briskFrame}}));
+      }));
       if (this.domElement_.classList.contains('active')) {
         document.getElementById('startup-preview')?.remove();
         globalThis.briskPreview = null;
@@ -1552,12 +1578,13 @@ export class Session {
     }
   }
 
-  resize(width, height, dpr) {
+  resize(width, height, dpr, alreadyApplied = false) {
     if (this.domElement_) {
       this.domElement_.style.width = Math.floor(width) + 'px';
       this.domElement_.style.height = Math.floor(height) + 'px';
     }
     globalThis.briskViewport?.();
+    if(alreadyApplied)return Promise.resolve({});
     return this.ws.req('Emulation.setDeviceMetricsOverride', {
       height: Math.floor(height),
       width: Math.floor(width),

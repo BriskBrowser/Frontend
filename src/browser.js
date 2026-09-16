@@ -53,6 +53,8 @@ export class Browser {
     // response from a request.  The intention is a server can fire
     // off all these requests to the browser before the client even
     // connects to speed up initial loading.
+    socket.eventListeners['PageStream.timing']=params=>performance.mark('brisk:server:'+params.stage,{detail:{elapsed:params.elapsed}});
+
     socket.eventListeners['Target.targetCreated'] = msg => {
       if (msg.targetInfo.type == 'page' && !this.attached) {
         socket.req(undefined, 'Target.attachToTarget', {targetId: msg.targetInfo.targetId, flatten: true});
@@ -95,7 +97,10 @@ export class Browser {
       this.sessionActivate(msg.sessionId);
 
       let dims = this.rootElement.getBoundingClientRect();
-      await sess.resize(dims.width, dims.height, window.devicePixelRatio);
+      const initial=socket.initialViewport;
+      const alreadyApplied=initial&&initial.w===Math.floor(dims.width)&&initial.h===Math.floor(dims.height)&&initial.dpr===window.devicePixelRatio;
+      await sess.resize(dims.width, dims.height, window.devicePixelRatio,alreadyApplied);
+      socket.initialViewport=null;
 
       sess.ws.req('Page.enable', {});
       // Proxy-only capability: SocketHandler strips binaryTiles before
@@ -106,10 +111,11 @@ export class Browser {
       const vp9Tiles = h264Tiles && vp9Supported;
       const streamTiles = h264Tiles && vp9Tiles && typeof DecompressionStream === 'function' && localStorage.getItem('briskTileStream') !== '0' && sessionStorage.getItem('briskTileStreamRecovery') !== '1';
       socket.tileStreamNegotiated = streamTiles;
-      sess.bootstrapPreview = streamTiles;
+      sess.bootstrapPreview = streamTiles; // startupMode disables client upgrades on a capable proxy.
       sess.ws.req('PageStream.enable', {
+        fastStartup:true, cachedPreview:!!globalThis.briskPreview,
         previewURL: this.currentURL(),
-        previewSeed: globalThis.briskPreview && globalThis.briskPreview.token,
+        previewSeed: globalThis.briskPreview?.seed !== false && globalThis.briskPreview?.token,
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',

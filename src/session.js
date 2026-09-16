@@ -192,17 +192,16 @@ export class Session {
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
         x.sessionId && this.onNewSession(x.sessionId, this)
       });
-      // A navigation's first frame may be just the masthead/background.
-      // While the document is loading, let later content tiles paint as they
-      // arrive even if the layout changed. Waiting for every offscreen tile
-      // before replacing that empty layout delayed BBC headlines by seconds.
-      // Once loading has settled, retain whole-frame structural updates.
+      // Paint initial and tile-only updates progressively. Once a layout is
+      // visible, keep structural replacements together through frameDone:
+      // deleting old layers before their replacements arrive exposes white
+      // holes, even while the origin document is still loading (BBC News).
       const update = msg.layerUpdate;
       const structural = u => u.layerInfo || u.layerDeleted || u.zIndex !== undefined;
       const pendingStructure = this.sessionState.nextProptrees ||
         this.sessionState.nextLayerUpdates.some(structural);
       if (this.domElement_ && update.bufferUpdates && !structural(update) &&
-          (!this.sessionState.comittedProptrees || !pendingStructure || !this.documentLoaded))
+          (!this.sessionState.comittedProptrees || !pendingStructure))
         this.commitPendingUpdates();
     };
 
@@ -237,9 +236,6 @@ export class Session {
       this.fullUpdateRequired = true;
     };
     
-    this.documentLoaded = false;
-    this.ws.eventListeners['Page.loadEventFired'] = () => {this.documentLoaded = true;};
-
     this.ws.eventListeners['PageStream.frameDone'] = () => {
       // Required by the protocol (browser_protocol.pdl: "Must be sent by
       // the client once per frameDone") but was never actually implemented
@@ -251,7 +247,7 @@ export class Session {
       // bookkeeping below, so the server sees it as promptly as possible.
       this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
-      if(this.previewFrameHasLayers){this.bootstrapPreview=false;this.clearCompactPreview();if(this.domElement_?.classList.contains('active')){document.getElementById('startup-preview')?.remove();globalThis.briskPreview=null;}}
+      if (this.previewFrameHasLayers) this.clearPreviewAfterPaint = true;
     };
 
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {
@@ -1543,6 +1539,17 @@ export class Session {
         t.dom.remove();
     });
     this.updateTargetHeights();
+    // frameDone only schedules this paint. Keep previews until the matching
+    // interactive layers have actually been installed in the DOM.
+    if (this.clearPreviewAfterPaint) {
+      this.clearPreviewAfterPaint = false;
+      this.bootstrapPreview = false;
+      this.clearCompactPreview();
+      if (this.domElement_.classList.contains('active')) {
+        document.getElementById('startup-preview')?.remove();
+        globalThis.briskPreview = null;
+      }
+    }
   }
 
   resize(width, height, dpr) {

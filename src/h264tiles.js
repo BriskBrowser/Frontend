@@ -57,6 +57,26 @@ export class H264TileDecoder {
   close() { if (this.decoder.state !== 'closed') this.decoder.close(); }
 }
 
+// Decode image tiles before their metadata can replace retained pixels.
+// A fresh <img> decodes asynchronously even after all of its bytes arrived;
+// presenting its empty box first flashes white during structural updates.
+export async function decodeImageTile(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+    canvas.sharable = true;
+    return canvas;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // Each DOM placement needs its own canvas, including content-id cache hits.
 // Sharing the cached canvas element would move it out of the previous layer.
 export function tileElement(source) {

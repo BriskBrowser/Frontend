@@ -2,7 +2,7 @@ import './viewport.js';
 import './metadataCodec.js';
 import {TileStreamDecoder} from './tileStream.js';
 import './tileDelta.js';
-import {H264TileDecoder, Vp9TileDecoder} from './h264tiles.js';
+import {H264TileDecoder, Vp9TileDecoder, decodeImageTile} from './h264tiles.js';
 import './glyphcodec.js';
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
@@ -164,21 +164,23 @@ export class devToolsWebsocket extends WebSocket {
           return decodeVectorTile(payload).then(blob => blob.arrayBuffer()).then(buffer => {
             if (!this.glyphDecoder) return; // socket closed during decompression
             const svg = this.glyphDecoder.decode(new Uint8Array(buffer));
-            this.binaryImages.set(id, URL.createObjectURL(new Blob([svg], {type: 'image/svg+xml'})));
+            return decodeImageTile(new Blob([svg], {type: 'image/svg+xml'})).then(canvas => {
+              if (!this.streamClosed) this.binaryImages.set(id, canvas);
+            });
           });
         }
         if (mime === 'image/svg+xml+gzip') {
-          // Metadata must not overtake asynchronous decompression. The
-          // ordered receive queue below waits for this one tile, then runs
-          // ordinary JSON and image messages synchronously again.
-          return decodeVectorTile(payload).then(blob => {
-            if (this.streamClosed) return;
-            this.binaryImages.set(id, URL.createObjectURL(blob));
+          // Metadata must not overtake decompression or image decoding.
+          // The ordered receive queue waits until pixels can be placed
+          // synchronously, just as it does for video tiles.
+          return decodeVectorTile(payload).then(decodeImageTile).then(canvas => {
+            if (!this.streamClosed) this.binaryImages.set(id, canvas);
           });
         }
         const blob = new Blob([payload], {type: mime});
-        this.binaryImages.set(id, URL.createObjectURL(blob));
-        return;
+        return decodeImageTile(blob).then(canvas => {
+          if (!this.streamClosed) this.binaryImages.set(id, canvas);
+        });
       }
       return this.dispatchMessage(JSON.parse(data));
   }

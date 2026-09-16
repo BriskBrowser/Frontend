@@ -10,10 +10,12 @@ export class CompactPreview {
     for(const run of text){
       if(typeof run.text!=='string'||(total+=run.text.length)>200000||![run.x,run.y,run.width,run.fontSize,run.color].every(Number.isFinite)||run.width<0||run.width>8192||run.fontSize<=0||run.fontSize>4096||Math.abs(run.x)>8192||Math.abs(run.y)>8192||run.color<0||run.color>0xffffffff)throw Error('Preview text bounds');
     }
-    let image=source,bitmap;
+    let image=source;
     try{
       if(typeof source==='string'){
-        const response=await fetch(source);bitmap=await createImageBitmap(await response.blob());image=bitmap;
+        // HTML images decode both raster and SVG compact primitives. Chromium
+        // does not support SVG blobs in createImageBitmap on this path.
+        image=new Image();image.src=source;await image.decode();
       }
       if(generation!==this.generation)return;
       if(!image||image.width!==width||image.height!==height)throw Error('Preview image dimensions');
@@ -30,7 +32,7 @@ export class CompactPreview {
       Object.assign(canvas.style,{position:'absolute',left:'0',top:'0',width:width+'px',height:height+'px',zIndex:'2147483646',background:'white'});
       if(this.canvas)this.canvas.remove();this.canvas=canvas;
       this.attach(parent);
-    }finally{if(bitmap)bitmap.close();if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);}
+    }finally{if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);}
   }
   attach(parent){if(parent&&this.canvas)parent.appendChild(this.canvas);}
   clear(){++this.generation;if(this.canvas)this.canvas.remove();this.canvas=null;}

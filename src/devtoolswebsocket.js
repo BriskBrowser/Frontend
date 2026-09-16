@@ -56,7 +56,7 @@ export class devToolsWebsocket extends WebSocket {
     this.addEventListener('close', event => {
       // One automatic recovery on codec/base failure: a new connection starts
       // with independent tiles, so no stale prediction history can survive.
-      if (this.tileStreamNegotiated && [1002,1011,1013].includes(event.code)) {
+      if (this.tileStreamNegotiated && [1002,1011,1013,4002].includes(event.code)) {
         try {if (sessionStorage.getItem('briskTileStreamRecovery') !== '1') {sessionStorage.setItem('briskTileStreamRecovery','1');location.reload();}} catch (_) {}
       }
       this.streamClosed = true;
@@ -108,7 +108,7 @@ export class devToolsWebsocket extends WebSocket {
     } catch (error) {
       this.receiveQueue.length = 0;
       console.error('PageStream: invalid tile stream', error);
-      this.close(1002, 'Invalid tile stream');
+      this.close(4002, 'Invalid tile stream');
     } finally {
       this.receiving = false;
     }
@@ -227,7 +227,7 @@ export class devToolsWebsocket extends WebSocket {
           ? this.metadataEncoder.encode(JSON.parse(request)) : request);
       } catch (error) {
         // Encoding advances dictionaries. A failed send cannot be skipped.
-        this.close(1002, 'Metadata send failed');
+        this.close(4002, 'Metadata send failed');
         throw error;
       }
       this.callbacks[this.nextid] = {resolve, reject}

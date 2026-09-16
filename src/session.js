@@ -180,7 +180,7 @@ export class Session {
         });
       }).catch(error=>{
         console.error('PageStream: invalid compact preview',error);
-        this.ws.ws.close(1002,'Invalid compact preview');
+        this.ws.ws.close(4002,'Invalid compact preview');
       });
     };
 
@@ -251,7 +251,7 @@ export class Session {
       // bookkeeping below, so the server sees it as promptly as possible.
       this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
-      if(this.previewFrameHasLayers){this.bootstrapPreview=false;this.clearCompactPreview();if(this.domElement_.classList.contains('active')){document.getElementById('startup-preview')?.remove();globalThis.briskPreview=null;}}
+      if(this.previewFrameHasLayers){this.bootstrapPreview=false;this.clearCompactPreview();if(this.domElement_?.classList.contains('active')){document.getElementById('startup-preview')?.remove();globalThis.briskPreview=null;}}
     };
 
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {

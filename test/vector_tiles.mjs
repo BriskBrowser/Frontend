@@ -4,7 +4,7 @@ import {gzipSync} from 'node:zlib';
 import {EventEmitter} from 'node:events';
 class FakeSocket extends EventEmitter {
   addEventListener(...args) {this.on(...args);}
-  close(code) {this.closed=code;}
+  close(code) {assert(code===undefined||code===1000||(code>=3000&&code<=4999),'Browser-legal close code');this.closed=code;}
 }
 globalThis.WebSocket=FakeSocket;
 globalThis.briskViewport=()=>({w:412,h:915,dpr:2.6});

@@ -210,6 +210,16 @@ export class Browser {
     this.arrangeSessions();
   }
 
+  async activateMedia(sessionId) {
+    if(typeof AudioDecoder !== 'function' || typeof VideoDecoder !== 'function')return;
+    try {
+      const {MediaPlayback}=await (this.mediaModule ||= import('/mediaPlayback.js'));
+      if(this.activeSession!==sessionId || this.socket.readyState>1)return;
+      if(!this.media)this.media=new MediaPlayback(this.socket,this.rootElement);
+      this.media.activate(sessionId);
+    } catch(error){console.warn('Media player unavailable:',error.message);}
+  }
+
   sessionActivate(sessionId, destinationURL) {
 /*    Object.keys(sessions).forEach((sid) => {
       //var cl = sessions[sid].domElement_.classList;
@@ -224,6 +234,7 @@ export class Browser {
     this.sessions[sessionId].domElement = elem;
 
     this.activeSession = sessionId;
+    this.activateMedia(sessionId);
     if (destinationURL) this.sessions[sessionId].currentURL = destinationURL;
     // A speculative session normally completed its navigation while hidden,
     // so its frameNavigated event was correctly ignored by the address bar.

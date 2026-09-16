@@ -25,6 +25,14 @@ export class Browser {
     var socket = this.socket = await wsPromise;
 
     window.sessions = this.sessions;  // for testing
+    socket.eventListeners['PageStream.sessionAvailable'] = params => {
+      this.addSession(params.sessionId, null);
+    };
+    socket.eventListeners['PageStream.activateSession'] = params => {
+      this.addSession(params.sessionId, null);
+      if (String(this.activeSession) !== String(params.sessionId))
+        this.sessionActivate(params.sessionId);
+    };
     // The outer browser's address/history is the thin client's navigation
     // UI. Store the represented server-side URL in every entry so native
     // back and forward buttons can drive the active remote page.
@@ -129,6 +137,7 @@ export class Browser {
 
     socket.eventListeners['Target.detachedFromTarget'] = msg => {
       if (!this.sessions[msg.sessionId]) return;   // duplicate/unmatched detach
+      for (const session of Object.values(this.sessions)) session.forgetPreload(msg.sessionId);
       this.sessions[msg.sessionId].destroy();
       delete this.sessions[msg.sessionId];
       this.arrangeSessions();

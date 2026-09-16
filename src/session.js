@@ -879,6 +879,23 @@ export class Session {
 
   }
 
+  forgetPreload(sessionId) {
+    const clear = target => {
+      if (String(target.sessionId) !== String(sessionId)) return false;
+      target.sessionId = null;
+      target.ready = false;
+      target.inputReady = false;
+      return true;
+    };
+    for (const status of this.targetStatuses.values()) clear(status);
+    this.sessionState.layer_tree.forEach(layer => {
+      for (const target of Object.values(layer.targets || {})) {
+        if (clear(target) && this.domElement_ && layer.dom && !layer.unresolved)
+          this.createTargetNode(target, layer);
+      }
+    });
+  }
+
   targetTouch(type, evt) {
     if (evt.pointerType === 'mouse') return;
     // We want to detect 'click' events, but have to use touch instead because

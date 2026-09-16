@@ -557,7 +557,7 @@ export class Session {
           t.dom = adopt
         }
 
-      var oldZIndex = t.zIndex || -1;
+      var oldZIndex = t.zIndex ?? -1;
       
       if (oldZIndex < zIndex || !t.dom || t.dom.adoptable) {
         t.zIndex = Math.max(zIndex, oldZIndex);
@@ -830,6 +830,10 @@ export class Session {
     l.dom.style.width=l.bounds[0] + 'px';
     l.dom.style.height=l.bounds[1] + 'px';
     l.dom.style.overflow = 'hidden';
+    // Paint regions can contain transparent gaps (including Chromium's own
+    // full-viewport fixed-content picture). Native scroll boxes and explicit
+    // link regions own input; a raster rectangle must not intercept it.
+    l.dom.style.pointerEvents = 'none';
     l.dom.style.position = 'absolute';
     l.dom.style.zIndex = l.zIndex;
     l.dom.style.opacity = this.layerDrawOpacity(l);
@@ -1124,6 +1128,25 @@ export class Session {
 
     var layer_tree = this.sessionState.layer_tree;
 
+    // Export-region membership can change without changing a scroll container.
+    // Keep its live DOM node by compositor element id, rather than relying on
+    // whichever old paint layer happens to be visited first. Replacing it
+    // during a gesture loses momentum, local-scroll protection and listeners.
+    const elementKey = node => node && node.element_id &&
+      (typeof node.element_id === 'object' ? node.element_id.id_ : node.element_id);
+    const scrollDoms = new Map();
+    (this.sessionState.scroll_tree || []).forEach(node => {
+      const transform = node && node.transform_id;
+      const key = elementKey(node);
+      if (key && transform && transform.dom && transform.dom.isConnected)
+        scrollDoms.set(key, transform.dom);
+    });
+    scroll_tree.forEach(node => {
+      const dom = scrollDoms.get(elementKey(node));
+      const transform = transform_tree[node.transform_id];
+      if (dom && transform) transform.dom = dom;
+    });
+
     function get_tree_node(a) {
       if (Number.isInteger(a)) return a;
       if (a === undefined) return a;
@@ -1253,7 +1276,7 @@ export class Session {
     this.sessionState.comittedLayerUpdates.forEach(params => {
       var l = this.sessionState.layer_tree[params.layerId] = this.sessionState.layer_tree[params.layerId] || { targets: {}};
 
-      if (params.layerDeleted || params.layerInfo || params.zIndex || params.targets) {
+      if (params.layerDeleted || params.layerInfo || params.zIndex !== undefined || params.targets) {
         this.fullUpdateRequired = true;
       }
 
@@ -1268,7 +1291,7 @@ export class Session {
         this.sessionState.layer_tree[params.layerId] = l = {...l, ...this.decodeLayerInfo(params.layerInfo)};
       }
 
-      if (params.zIndex)
+      if (params.zIndex !== undefined)
         l.zIndex=params.zIndex;
 
       if (params.bufferUpdates) {
@@ -1523,7 +1546,12 @@ export class Session {
   }
 
   resize(width, height, dpr) {
-    this.ws.req('Emulation.setDeviceMetricsOverride', {
+    if (this.domElement_) {
+      this.domElement_.style.width = Math.floor(width) + 'px';
+      this.domElement_.style.height = Math.floor(height) + 'px';
+    }
+    globalThis.briskViewport?.();
+    return this.ws.req('Emulation.setDeviceMetricsOverride', {
       height: Math.floor(height),
       width: Math.floor(width),
       deviceScaleFactor: dpr,

@@ -1,3 +1,4 @@
+import './viewport.js';
 import './metadataCodec.js';
 import {TileStreamDecoder} from './tileStream.js';
 import './tileDelta.js';
@@ -32,7 +33,7 @@ export async function decodeVectorTile(bytes, format = 'gzip') {
 export class devToolsWebsocket extends WebSocket {
   constructor(host){
     const early = globalThis.briskEarly;
-    const socket = early && early.ws.url.split('?')[0] === host.replace(/\/$/, '') + '/devtools/browser' && early.ws.readyState < 2 ? early.ws : new WebSocket(host + '/devtools/browser', globalThis.BriskMetadata.protocol);
+    const socket = early && early.ws.url.split('?')[0] === host.replace(/\/$/, '') + '/devtools/browser' && early.ws.readyState < 2 ? early.ws : new WebSocket(host.replace(/\/$/, '') + '/devtools/browser?' + new URLSearchParams(globalThis.briskViewport()), globalThis.BriskMetadata.protocol);
     Object.setPrototypeOf(socket, new.target.prototype);
     socket.initialize();
     if (early) {

@@ -62,11 +62,13 @@ bb-session.fullscreen:not(.active){
 }
 
 .t {
+  pointer-events: none;
   transform-origin: 0px 0px 0px;
   position: absolute;
 }
 
 .scroll {
+  pointer-events: auto;
   overflow: scroll;
 }
 

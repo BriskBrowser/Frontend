@@ -7,6 +7,7 @@ class FakeSocket extends EventEmitter {
   close(code) {this.closed=code;}
 }
 globalThis.WebSocket=FakeSocket;
+globalThis.briskViewport=()=>({w:412,h:915,dpr:2.6});
 globalThis.BriskMetadata = (await import('../src/metadataCodec.js')).default;
 globalThis.BriskTileDelta = (await import('../src/tileDelta.js')).default;
 globalThis.BriskGlyphCodec = (await import('../src/glyphcodec.js')).default;

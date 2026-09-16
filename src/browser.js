@@ -95,7 +95,7 @@ export class Browser {
       this.sessionActivate(msg.sessionId);
 
       let dims = this.rootElement.getBoundingClientRect();
-      sess.resize(dims.width, dims.height, window.devicePixelRatio);
+      await sess.resize(dims.width, dims.height, window.devicePixelRatio);
 
       sess.ws.req('Page.enable', {});
       // Proxy-only capability: SocketHandler strips binaryTiles before

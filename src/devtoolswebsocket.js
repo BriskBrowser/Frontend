@@ -116,7 +116,11 @@ export class devToolsWebsocket extends WebSocket {
         const data = this.receiveQueue[this.receiveHead];
         this.receiveQueue[this.receiveHead++] = null;
         const pending = this.handleMessageData(data);
-        if (pending) await pending;
+        if (pending) {
+          // Decoder waits already let browser tasks run; charge the budget
+          // for synchronous dispatch, not time waiting for pixels.
+          const paused=performance.now();await pending;deadline+=performance.now()-paused;
+        }
       }
     } catch (error) {
       this.receiveQueue.length = 0;

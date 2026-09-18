@@ -1,3 +1,4 @@
+import {ForkDebug} from './forkDebug.js';
 import {supportsH264Tiles, supportsVp9Tiles} from './h264tiles.js';
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
 import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
@@ -24,6 +25,12 @@ export class Browser {
 
     var socket = this.socket = await wsPromise;
 
+    this.forkDebug = new ForkDebug(this);
+
+    socket.addEventListener('close', () => this.showError('The browser connection was lost. Reload to reconnect.'));
+    socket.eventListeners['PageStream.navigationFailed'] = params => {
+      this.showError('Could not load this page: ' + (params.message || 'Navigation failed'));
+    };
     window.sessions = this.sessions;  // for testing
     socket.eventListeners['PageStream.sessionAvailable'] = params => {
       this.addSession(params.sessionId, null);
@@ -71,7 +78,7 @@ export class Browser {
       }
     };
 
-    socket.eventListeners['Target.attachedToTarget'] = async msg => {
+    const initializeTarget = async msg => {
       // Only a real page target is something this client can render, and
       // 'Target.targetCreated' above has always agreed (`type == 'page'`) --
       // but this handler did not, and it is the one that actually builds a
@@ -132,8 +139,13 @@ export class Browser {
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });
       interactionTrace.record('navigate', {url: this.currentURL()});
-      sess.ws.req('Page.navigate', {url: this.currentURL()});
+      const response = await sess.ws.req('Page.navigate', {url: this.currentURL()});
+      if (response.errorText) this.showError('Could not load this page: ' + response.errorText);
     };
+
+    socket.eventListeners['Target.attachedToTarget'] = msg => initializeTarget(msg).catch(error => {
+      this.showError('Could not start this page: ' + (error.message || String(error)));
+    });
 
     socket.eventListeners['Target.detachedFromTarget'] = msg => {
       if (!this.sessions[msg.sessionId]) return;   // duplicate/unmatched detach
@@ -166,6 +178,25 @@ export class Browser {
       Object.values(this.sessions).forEach(x => x.resize(dims.width, dims.height, window.devicePixelRatio));
     }
     window.addEventListener('resize', resize);
+  }
+
+  showError(message) {
+    let panel = document.getElementById('brisk-load-error');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'brisk-load-error';
+      panel.setAttribute('role', 'alert');
+      Object.assign(panel.style, {position:'fixed', top:'0', left:'0', right:'0',
+        zIndex:'2147483647', padding:'16px', background:'#fff', color:'#222', font:'16px sans-serif'});
+      const text = document.createElement('span');
+      const retry = document.createElement('button');
+      retry.textContent = 'Reload';
+      retry.style.marginLeft = '12px';
+      retry.onclick = () => location.reload();
+      panel.append(text, retry);
+      document.body.append(panel);
+    }
+    panel.firstChild.textContent = message;
   }
 
   currentURL() {

@@ -59,6 +59,8 @@ export class devToolsWebsocket extends WebSocket {
         try {if (sessionStorage.getItem('briskTileStreamRecovery') !== '1') {sessionStorage.setItem('briskTileStreamRecovery','1');location.reload();}} catch (_) {}
       }
       this.streamClosed = true;
+      for (const callback of this.callbacks) if (callback) callback.reject(new Error('Browser connection closed'));
+      this.callbacks = [];
       for (const source of this.binaryImages.values())
         if (typeof source === 'string') URL.revokeObjectURL(source);
       if (this.tileStreamDecoder) this.tileStreamDecoder.close();

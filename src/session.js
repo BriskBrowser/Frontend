@@ -1603,31 +1603,6 @@ export class Session {
     if (e.cancel) {
       n = 'touchCancel';
     }
-    // A finger is down but hasn't produced a native 'scroll' event *yet* --
-    // browsers don't fire one on the very first touchmove, only once actual
-    // movement is registered -- so applyServerScroll's own recency check
-    // (which depends on a 'scroll' event having already happened at least
-    // once) can't see this window on its own. touchActive alone still
-    // leaves a second gap: browser-driven momentum/fling can keep scrolling
-    // well after touchend, and there's no guarantee a fresh 'scroll' event
-    // has fired by the time the *next* one would (confirmed empirically:
-    // reproduced with just touchActive in place, under 1s one-way injected
-    // latency -- see test/run_latency.js). Track touch recency globally
-    // (not per scroll element -- a touch's eventual target isn't known
-    // without hit-testing) as a second, coarser guard alongside it.
-    this.sessionState.touchActive = (n === 'touchStart' || n === 'touchMove');
-    if (this.sessionState.touchActiveTimer)
-      clearTimeout(this.sessionState.touchActiveTimer);
-    this.sessionState.touchActiveTimer = null;
-    if (this.sessionState.touchActive) {
-      // A drag can leave the adopted root before touchend is dispatched to
-      // it. Never let that lost event permanently suppress server truth.
-      this.sessionState.touchActiveTimer = setTimeout(() => {
-        this.sessionState.touchActive = false;
-        this.sessionState.touchActiveTimer = null;
-      }, 2000);
-    }
-    this.sessionState.lastTouchTime = Date.now();
     this.trackGestureForTrace(n, e);
     this.handlePinchGesture(n, e);
     this.ws.req('Input.dispatchTouchEvent', {

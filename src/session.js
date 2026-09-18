@@ -146,13 +146,13 @@ export class Session {
   constructor(ws, baseSession, options) {
     this.options = options || {};
     this.sessionState = {
-      preventscroll: 0,
       nextLayerUpdates: [],
       comittedLayerUpdates: [],
       layer_tree: [],
       keyboard: {showing: false}
     };
 
+    this.scrollStates = new Map();
     this.ws = ws;
     this.onNewSession = () => {};
     this.onSessionActivate = () => {};
@@ -411,6 +411,7 @@ export class Session {
   set domElement(ele) {
     this.desktopInput?.destroy();
     this.desktopInput = null;
+    this.captureLocalScrolls();
     // get rid of old element
     this.domElement_ &&  this.domElement_.remove();
 
@@ -619,7 +620,6 @@ export class Session {
       }
       this.applyTransformCss(t);
 
-      if (t.scroll) this.applyServerScroll(t);
       t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
       t.dom.classList.toggle('scroll', !!t.scroll)
 
@@ -644,124 +644,72 @@ export class Session {
     }
   }
 
+  scrollState(t) {
+    const id = t.scroll.element_id.id_;
+    let state = this.scrollStates.get(id);
+    if (!state) {
+      state = {x: t.scroll_offset[0], y: t.scroll_offset[1], revision: undefined};
+      this.scrollStates.set(id, state);
+    }
+    return state;
+  }
+
   scrollHandler(t, evt) {
-    // Any scroll of `t` -- local (a real touch-driven gesture) or the echo
-    // fired by applyServerScroll's own `t.dom.scrollTop = ...` below --
-    // moves whatever this container's boundary sticky elements are
-    // anchored to, and must be reflected the instant it happens, with no
-    // round trip: that's the entire point of computing sticky offsets
-    // client-side (see stickyOffsetPx's own comment) rather than only ever
-    // applying whatever the server last streamed. Deliberately placed
-    // before the echo-detection guard right below: that guard exists only
-    // to stop a feedback loop back to the server (re-reporting a position
-    // the server itself just set), which has nothing to do with sticky
-    // elements needing to notice this container moved either way.
+    if (!t.dom.isConnected) return;
     this.refreshStickyFor(t);
-
-    // Distinguishes a real (touch-driven) scroll from the echo fired by
-    // applyServerScroll's own `t.dom.scrollTop = ...` below -- setting
-    // scrollTop programmatically still dispatches a native 'scroll' event,
-    // and without this guard that echo would immediately report the
-    // server's own value straight back to it as if the user had scrolled
-    // there themselves (harmless -- same value -- but pointless chatter,
-    // and it stomps the "was this recently a *local* scroll" signal
-    // applyServerScroll depends on).
-    if (t.dom.applyingServerScroll) { t.dom.applyingServerScroll = false; return; }
-
-    t.dom.lastLocalScrollTime = Date.now();
-    this.sessionState.preventscroll++;
-    this.sessionState.preventscrollElem = t.scroll.element_id.id_;
-    const scrollRequestFinished = () => {
-      this.sessionState.preventscroll--;
-      // preventscrollElem is a single global slot, not tracked per in-flight
-      // request -- it must be cleared once nothing is outstanding, or it
-      // permanently "remembers" whichever element last scrolled and blocks
-      // applyServerScroll from ever reconciling that element again, even
-      // long after this request actually completed (this was never visible
-      // before applyServerScroll existed, since nothing else read this
-      // field once the request settled).
-      if (!this.sessionState.preventscroll) this.sessionState.preventscrollElem = null;
-    };
-    this.ws.req('PageStream.setScroll', {backendNodeId:  t.scroll.element_id.id_, x: Math.floor(t.dom.scrollLeft), y: Math.floor(t.dom.scrollTop)})
-      .then(scrollRequestFinished, scrollRequestFinished);
+    const state = this.scrollState(t);
+    const x = t.dom.scrollLeft, y = t.dom.scrollTop;
+    // Native events are asynchronous and can coalesce a programmatic write
+    // with a later user movement. Suppress only an echo of the actual write.
+    const echo = t.dom.serverScrollEcho;
+    if (echo && echo.x === x && echo.y === y) return;
+    t.dom.serverScrollEcho = null;
+    if (state.x === x && state.y === y) return;
+    state.x = x;
+    state.y = y;
+    const params = {backendNodeId: t.scroll.element_id.id_, x: Math.round(x), y: Math.round(y)};
+    if (state.revision !== undefined) params.scrollRevision = state.revision;
+    if (state.epoch !== undefined) params.scrollEpoch = state.epoch;
+    // Completion is not evidence that a subsequently displayed frame includes
+    // this write. Only the server's scroll revision can change ownership.
+    this.ws.req('PageStream.setScroll', params).catch(() => {});
     this.updateTargetHeights();
   }
 
-  // Local scrolling is the whole point of this architecture -- a scroll
-  // gesture must never wait on the server. But the *server's* page can also
-  // move its own scroll positions (window.scrollTo(), infinite-scroll
-  // pagination, a "back to top" button, anything the page's own script
-  // does), and since PageStream only streams positions the server computed,
-  // that change is otherwise invisible until something makes the client
-  // adopt it. This reconciles the two: apply the server's reported
-  // scroll_offset for a '.scroll' element, but only once local activity on
-  // that *specific* element has gone quiet -- so an active user scroll
-  // always wins locally (the "typical case"), while a server-side
-  // reposition the user isn't actively fighting still eventually lands
-  // ("awkward script" case). Guards against redundant writes (the earlier,
-  // disabled version of this unconditionally set scrollTop/scrollLeft on
-  // every single update regardless of whether the value had even changed --
-  // called out in a comment here as a "perf bottleneck", which this avoids).
-  applyServerScroll(t) {
-    // A fresh incoming scroll_offset can legitimately be *stale* -- it's
-    // whatever the server had committed as of a round trip ago, and under
-    // real latency (the whole reason local scroll exists in the first
-    // place) that can lag several seconds behind a scroll already in
-    // flight. 2000ms is a deliberately generous margin against that,
-    // wider than a single round trip needs to be under most real-world
-    // latency -- worth being conservative here, since the failure mode of
-    // *too short* is actively snapping a live scroll backwards mid-fling
-    // (confirmed: reproduced at 400ms under 1s one-way injected latency,
-    // see test/run_latency.js), while *too long* just delays how quickly
-    // an "awkward script" server-side change is noticed, a much milder
-    // cost for what should be a rare case anyway.
-    var recentlyScrolledLocally = t.dom.lastLocalScrollTime && (Date.now() - t.dom.lastLocalScrollTime < 2000);
-    // Coarser, global backstop alongside the per-element check above: a
-    // touch's eventual scroll target isn't knowable without hit-testing, so
-    // this can't be narrowed to "this element specifically" -- any recent
-    // touch anywhere defers reconciliation everywhere, briefly. Shorter
-    // window than the per-element one (that touch may turn out to target a
-    // *different* element than the one being considered here, or none at
-    // all) but still long enough to cover momentum/fling's post-touchend
-    // ramp-up before its first native 'scroll' event fires.
-    var recentTouchAnywhere = this.sessionState.lastTouchTime && (Date.now() - this.sessionState.lastTouchTime < 1000);
-    // An unanswered setScroll request must not veto newer server truth
-    // forever. The per-element quiet window already covers its meaningful
-    // race with the gesture; after that, reconciliation is authoritative.
-    if (recentlyScrolledLocally || this.sessionState.touchActive || recentTouchAnywhere) {
-      // This update is still the newest server truth; deferring must not
-      // mean dropping it forever if no later layer update happens to arrive.
-      // Keep one timer per scroll container and retry after the grace windows
-      // have had a chance to expire. Persistent activity simply re-arms the
-      // same bounded timer until reconciliation is safe.
-      // Always replace the pending target: several property-tree updates can
-      // arrive during one grace period (including the echo of the user's old
-      // position followed by newer page-script truth).
-      t.dom.serverScrollPendingTarget = t;
-      if (!t.dom.serverScrollRetryTimer) {
-        t.dom.serverScrollRetryTimer = setTimeout(() => {
-          t.dom.serverScrollRetryTimer = null;
-          const pending = t.dom.serverScrollPendingTarget;
-          t.dom.serverScrollPendingTarget = null;
-          this.applyServerScroll(pending);
-        }, 250);
-      }
-      return;
-    }
-
-    if (t.dom.serverScrollRetryTimer) {
-      clearTimeout(t.dom.serverScrollRetryTimer);
-      t.dom.serverScrollRetryTimer = null;
-    }
-    t.dom.serverScrollPendingTarget = null;
-
-    var newTop = Math.round(t.scroll_offset[1]), newLeft = Math.round(t.scroll_offset[0]);
-    if (t.dom.scrollTop === newTop && t.dom.scrollLeft === newLeft) return;
-
-    t.dom.applyingServerScroll = true;
-    t.dom.scrollTop = newTop;
-    t.dom.scrollLeft = newLeft;
+  captureLocalScrolls() {
+    // A native movement may precede its event. Record and send it before tree
+    // reparenting can clamp the DOM or make its queued event look like an echo.
+    (this.sessionState.scroll_tree || []).forEach(node => {
+      const t = node && node.transform_id;
+      if (!t || !t.dom || !t.dom.isConnected || !t.scroll) return;
+      const state = this.scrollState(t), echo = t.dom.serverScrollEcho;
+      const x = t.dom.scrollLeft, y = t.dom.scrollTop;
+      if ((!echo || echo.x !== x || echo.y !== y) && (state.x !== x || state.y !== y))
+        this.scrollHandler(t);
+    });
   }
+
+  applyServerScroll(t) {
+    const state = this.scrollState(t);
+    const update = t.scroll.serverScroll;
+    if (update && (state.epoch !== update.epoch || state.revision === undefined || update.revision > state.revision)) {
+      state.epoch = update.epoch;
+      state.revision = update.revision;
+      state.x = update.x;
+      state.y = update.y;
+    }
+    // No timer: a repeated revision is an observation, never an instruction
+    // to replace local state, regardless of latency or outstanding requests.
+    const x = Math.round(state.x), y = Math.round(state.y);
+    if (t.dom.scrollLeft !== x || t.dom.scrollTop !== y) {
+      t.dom.scrollLeft = x;
+      t.dom.scrollTop = y;
+      // Record the browser's actual result, including layout clamping.
+      t.dom.serverScrollEcho = {x: t.dom.scrollLeft, y: t.dom.scrollTop};
+      this.refreshStickyFor(t);
+    }
+  }
+
   createDOMLayerImages(l) {
     l.images && l.images.forEach(i => {
       if (i.dom.activeInLayer != l) {
@@ -1185,6 +1133,10 @@ export class Session {
     var scroll_tree = propTrees.scroll_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
     var transform_tree = propTrees.transform_tree.nodes.reduce((map, obj) => (map[obj.id] = obj, map), []);
 
+    const scrollUpdates = propTrees.brisk_scroll_updates ? JSON.parse(propTrees.brisk_scroll_updates) : {};
+    scroll_tree.forEach(node => {
+      node.serverScroll = scrollUpdates[node.element_id && node.element_id.id_];
+    });
     var layer_tree = this.sessionState.layer_tree;
 
     // Export-region membership can change without changing a scroll container.
@@ -1560,6 +1512,8 @@ export class Session {
 
     if (!this.domElement_) return;
 
+    this.captureLocalScrolls();
+
     // Mark all transform nodes as adoptable
     var old_transform_tree = this.sessionState.transform_tree;
     if (old_transform_tree) old_transform_tree.forEach(t => {
@@ -1600,6 +1554,11 @@ export class Session {
     if (old_transform_tree) old_transform_tree.forEach(t => {
       if (t.dom && (t.dom.adoptable==true))
         t.dom.remove();
+    });
+    // Scroll extents are valid only after the entire frame has been assembled.
+    (this.sessionState.scroll_tree || []).forEach(node => {
+      const t = node && node.transform_id;
+      if (t && t.dom && t.dom.isConnected && t.scroll) this.applyServerScroll(t);
     });
     this.updateTargetHeights();
     // frameDone only schedules this paint. Keep previews until the matching

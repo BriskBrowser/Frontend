@@ -116,12 +116,13 @@ export class DesktopInput {
     if (e.shiftKey && !dx) {dx = dy; dy = 0;}
     // Let the native browser scroll (and chain) represented containers. Some
     // non-composited inner scrollers are baked into raster tiles; only those
-    // require a remote wheel event when there is no local scroll to perform.
-    const canScroll = (position, maximum, delta) => delta < 0 ? position > 0 : delta > 0 && position < maximum;
+    // require a remote wheel event when there is no represented scroll axis.
+    // At a local edge, forwarding would scroll the server's stale position and
+    // turn a duplicate wheel gesture into an authoritative correction.
     for (const node of e.composedPath()) {
       if (node.classList?.contains('scroll') &&
-          (canScroll(node.scrollTop, node.scrollHeight-node.clientHeight, dy) ||
-           canScroll(node.scrollLeft, node.scrollWidth-node.clientWidth, dx))) return;
+          ((dy && node.scrollHeight > node.clientHeight) ||
+           (dx && node.scrollWidth > node.clientWidth))) return;
       if (node === this.root) break;
     }
     e.preventDefault();

@@ -141,6 +141,59 @@ function clipPathForTile(entry) {
   return 'path("' + d + '")';
 }
 
+// Network counterpart of cc/base/synced_property.h (AdditionGroup).
+// The active tree draws base + delta. A pending renderer commit replaces the
+// base and subtracts ONLY the client deltas that commit already reflects.
+// Cumulative reflected values generalize Chromium's single in-flight commit
+// bookkeeping to an ordered network with multiple outstanding delta batches.
+export class SyncedScrollOffset {
+  constructor(x = 0, y = 0) {
+    this.baseX = x; this.baseY = y;
+    this.deltaX = 0; this.deltaY = 0;
+    this.reflectedX = 0; this.reflectedY = 0;
+    this.sentX = 0; this.sentY = 0;
+    this.sequence = 0; this.revision = -1;
+  }
+  get x() { return this.baseX + this.deltaX; }
+  get y() { return this.baseY + this.deltaY; }
+  setCurrent(x, y) {
+    this.deltaX = x - this.baseX;
+    this.deltaY = y - this.baseY;
+  }
+  pullDeltaForMainThread() {
+    if (this.epoch === undefined) return null;
+    const x = Math.round(this.reflectedX + this.deltaX);
+    const y = Math.round(this.reflectedY + this.deltaY);
+    if (x === this.sentX && y === this.sentY) return null;
+    this.sentX = x; this.sentY = y;
+    return {x, y, scrollSequence: ++this.sequence, scrollEpoch: this.epoch};
+  }
+  pushMainToPending(update) {
+    if (this.epoch === update.epoch && update.revision <= this.revision) return;
+    if (this.pending?.epoch === update.epoch && update.revision <= this.pending.revision) return;
+    this.pending = update;
+  }
+  pushPendingToActive() {
+    const update = this.pending;
+    if (!update) return;
+    this.pending = null;
+    if (this.epoch === undefined || this.epoch !== update.epoch) {
+      // Epoch replacement represents a new document or Chromium's explicit
+      // clobber-active-value condition, not an ordinary main-thread scroll.
+      if (this.epoch !== undefined) this.deltaX = this.deltaY = 0;
+      this.sentX = update.reflectedX; this.sentY = update.reflectedY;
+      this.sequence = update.sequence;
+    } else {
+      this.deltaX -= update.reflectedX - this.reflectedX;
+      this.deltaY -= update.reflectedY - this.reflectedY;
+      this.sequence = Math.max(this.sequence, update.sequence);
+    }
+    this.epoch = update.epoch; this.revision = update.revision;
+    this.reflectedX = update.reflectedX; this.reflectedY = update.reflectedY;
+    this.baseX = update.x; this.baseY = update.y;
+  }
+}
+
 export class Session {
   // domElement can be null, in which case this session will be initialised when its set with the setter.
   constructor(ws, baseSession, options) {
@@ -648,7 +701,7 @@ export class Session {
     const id = t.scroll.element_id.id_;
     let state = this.scrollStates.get(id);
     if (!state) {
-      state = {x: Math.round(t.scroll_offset[0]), y: Math.round(t.scroll_offset[1]), revision: undefined};
+      state = new SyncedScrollOffset(t.scroll_offset[0], t.scroll_offset[1]);
       this.scrollStates.set(id, state);
     }
     return state;
@@ -664,16 +717,19 @@ export class Session {
     const echo = t.dom.serverScrollEcho;
     if (echo && echo.x === x && echo.y === y) return;
     t.dom.serverScrollEcho = null;
-    if (state.x === x && state.y === y) return;
-    state.x = x;
-    state.y = y;
-    const params = {backendNodeId: t.scroll.element_id.id_, x: Math.round(x), y: Math.round(y)};
-    if (state.revision !== undefined) params.scrollRevision = state.revision;
-    if (state.epoch !== undefined) params.scrollEpoch = state.epoch;
-    // Completion is not evidence that a subsequently displayed frame includes
-    // this write. Only the server's scroll revision can change ownership.
-    this.ws.req('PageStream.setScroll', params).catch(() => {});
+    if (Math.round(state.x) === x && Math.round(state.y) === y) return;
+    state.setCurrent(x, y);
+    this.sendScrollDelta(t, state);
     this.updateTargetHeights();
+  }
+
+  sendScrollDelta(t, state) {
+    const delta = state.pullDeltaForMainThread();
+    if (!delta) return;
+    const params = {backendNodeId: t.scroll.element_id.id_, ...delta};
+    // Completion is not evidence that a subsequently displayed frame includes
+    // this delta. Only reflected deltas in an activated tree acknowledge it.
+    this.ws.req('PageStream.setScroll', params).catch(() => {});
   }
 
   captureLocalScrolls() {
@@ -684,7 +740,7 @@ export class Session {
       if (!t || !t.dom || !t.dom.isConnected || !t.scroll) return;
       const state = this.scrollState(t), echo = t.dom.serverScrollEcho;
       const x = t.dom.scrollLeft, y = t.dom.scrollTop;
-      if ((!echo || echo.x !== x || echo.y !== y) && (state.x !== x || state.y !== y))
+      if ((!echo || echo.x !== x || echo.y !== y) && (Math.round(state.x) !== x || Math.round(state.y) !== y))
         this.scrollHandler(t);
     });
   }
@@ -692,14 +748,12 @@ export class Session {
   applyServerScroll(t) {
     const state = this.scrollState(t);
     const update = t.scroll.serverScroll;
-    if (update && (state.epoch !== update.epoch || state.revision === undefined || update.revision > state.revision)) {
-      state.epoch = update.epoch;
-      state.revision = update.revision;
-      state.x = Math.round(update.x);
-      state.y = Math.round(update.y);
+    if (update) {
+      state.pushMainToPending(update);
+      state.pushPendingToActive();
     }
-    // No timer: a repeated revision is an observation, never an instruction
-    // to replace local state, regardless of latency or outstanding requests.
+    // Activation keeps all input not reflected in this renderer commit. No
+    // timeout or request reply can replace the active compositor-side state.
     const x = Math.round(state.x), y = Math.round(state.y);
     if (t.dom.scrollLeft !== x || t.dom.scrollTop !== y) {
       t.dom.scrollLeft = x;
@@ -708,6 +762,7 @@ export class Session {
       t.dom.serverScrollEcho = {x: t.dom.scrollLeft, y: t.dom.scrollTop};
       this.refreshStickyFor(t);
     }
+    this.sendScrollDelta(t, state);
   }
 
   createDOMLayerImages(l) {
@@ -1600,15 +1655,42 @@ export class Session {
       this.suppressTouchEnd = false;
       return;
     }
-    if (e.cancel) {
-      n = 'touchCancel';
-    }
+    if (e.cancel) n = 'touchCancel';
     this.trackGestureForTrace(n, e);
     this.handlePinchGesture(n, e);
+
+    if (n === 'touchStart') {
+      this.localTouchScroll = false;
+      const finger = e.touches.length === 1 && e.touches[0];
+      this.touchScrollOrigin = finger && {
+        x: finger.clientX, y: finger.clientY,
+        scrollers: e.composedPath().filter(node => node.classList?.contains('scroll'))
+      };
+    }
+    const origin = this.touchScrollOrigin;
+    if (n === 'touchMove' && !this.localTouchScroll && origin && e.touches.length === 1) {
+      const dx = origin.x - e.touches[0].clientX, dy = origin.y - e.touches[0].clientY;
+      if (Math.hypot(dx, dy) >= 8 && origin.scrollers.some(dom =>
+          (dx && dom.scrollWidth > dom.clientWidth) ||
+          (dy && dom.scrollHeight > dom.clientHeight))) {
+        // Native browsers cancel the page's touch stream when scrolling takes
+        // over. Do the same remotely BEFORE forwarding a move that could start
+        // a second server-side fling. This includes gestures at a local edge:
+        // the delayed server might still be far from that edge. setScroll
+        // carries the local movement.
+        this.localTouchScroll = true;
+        this.ws.req('Input.dispatchTouchEvent', {type:'touchCancel',touchPoints:[]}).catch(() => {});
+      }
+    }
+    if (this.localTouchScroll) {
+      if (n === 'touchEnd' || n === 'touchCancel') this.touchScrollOrigin = null;
+      return;
+    }
+    if (n === 'touchEnd' || n === 'touchCancel') this.touchScrollOrigin = null;
     this.ws.req('Input.dispatchTouchEvent', {
       type: n,
       touchPoints: Array(...e.touches).map(t => { return {x: t.clientX, y: t.clientY, id:t.identifier}}),
-    });
+    }).catch(() => {});
   }
 
   // Records single-finger drags as 'scroll' trace events (see

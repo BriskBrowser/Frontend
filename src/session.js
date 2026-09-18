@@ -716,9 +716,13 @@ export class Session {
     // with a later user movement. Suppress only an echo of the actual write.
     const echo = t.dom.serverScrollEcho;
     if (echo && echo.x === x && echo.y === y) return;
-    t.dom.serverScrollEcho = null;
+    t.dom.serverScrollEcho = {x, y};
     if (Math.round(state.x) === x && Math.round(state.y) === y) return;
-    state.setCurrent(x, y);
+    // Layout may clamp the displayed DOM while the logical offset still has
+    // unreflected input. Add only movement since the last displayed position;
+    // treating this as an absolute offset would resend the clamp as input.
+    state.setCurrent(echo && state.deltaX ? state.x + x - echo.x : x,
+                     echo && state.deltaY ? state.y + y - echo.y : y);
     this.sendScrollDelta(t, state);
     this.updateTargetHeights();
   }

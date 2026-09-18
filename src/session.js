@@ -648,7 +648,7 @@ export class Session {
     const id = t.scroll.element_id.id_;
     let state = this.scrollStates.get(id);
     if (!state) {
-      state = {x: t.scroll_offset[0], y: t.scroll_offset[1], revision: undefined};
+      state = {x: Math.round(t.scroll_offset[0]), y: Math.round(t.scroll_offset[1]), revision: undefined};
       this.scrollStates.set(id, state);
     }
     return state;
@@ -695,8 +695,8 @@ export class Session {
     if (update && (state.epoch !== update.epoch || state.revision === undefined || update.revision > state.revision)) {
       state.epoch = update.epoch;
       state.revision = update.revision;
-      state.x = update.x;
-      state.y = update.y;
+      state.x = Math.round(update.x);
+      state.y = Math.round(update.y);
     }
     // No timer: a repeated revision is an observation, never an instruction
     // to replace local state, regardless of latency or outstanding requests.

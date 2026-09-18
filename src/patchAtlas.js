@@ -1,4 +1,5 @@
 import {TileStreamDecoder} from './tileStream.js';
+import {assertDisjoint} from './rectCoverage.js';
 
 // References contain exactly what this connection displayed, including codec
 // loss. Never reconstruct copies from the server's uncompressed source pixels.
@@ -27,7 +28,7 @@ export class PatchAtlasDecoder {
     if(flags&&(!imageSize||ah%2))throw Error('Invalid atlas alpha plane');
     const colorHeight=flags?ah/2:ah;
     // Validate the complete operation list before advancing a video decoder.
-    const occupied=new Uint8Array(w*h),rects=[];let area=0,novel=0;
+    const rects=[];let area=0,novel=0;
     for(let i=0;i<count;i++){
       const [base,sx,sy,x,y,rw,rh]=Array.from({length:7},(_,j)=>m.getUint32(12+i*28+j*4,true));
       if(!rw||!rh||x+rw>w||y+rh>h)throw Error('Atlas destination bounds');
@@ -35,10 +36,10 @@ export class PatchAtlasDecoder {
       if(base===0xffffffff){if(!imageSize||sx+rw>aw||sy+rh>colorHeight)throw Error('Atlas source bounds');novel++;}
       else if(!source||source.quality<quality||sx+rw>source.canvas.width||sy+rh>source.canvas.height)throw Error('Missing atlas reference or quality');
       area+=rw*rh;if(area>w*h)throw Error('Overlapping atlas');
-      for(let row=y;row<y+rh;row++)for(let col=x;col<x+rw;col++){const at=row*w+col;if(occupied[at])throw Error('Overlapping atlas');occupied[at]=1;}
       rects.push({source,sx,sy,x,y,rw,rh});
     }
     if(area!==w*h||!!imageSize!==!!novel)throw Error('Incomplete atlas coverage');
+    assertDisjoint(rects,w);
     let atlas=imageSize?await this.images.decode(bytes.subarray(32+metaSize)):null;
     if(this.closed)throw Error('Patch atlas closed');
     if(atlas&&(atlas.width!==aw||atlas.height!==ah))throw Error('Atlas image dimensions changed');
@@ -49,9 +50,14 @@ export class PatchAtlasDecoder {
       const combined=document.createElement('canvas');combined.width=aw;combined.height=colorHeight;
       combined.getContext('2d').putImageData(new ImageData(color,aw,colorHeight),0,0);atlas=combined;
     }
-    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
-    const ctx=canvas.getContext('2d');
-    for(const r of rects)ctx.drawImage(r.source?r.source.canvas:atlas,r.sx,r.sy,r.rw,r.rh,r.x,r.y,r.rw,r.rh);
+    const r=rects[0];
+    const shared=rects.length===1 && r.source && !r.sx && !r.sy &&
+      r.source.canvas.width===w && r.source.canvas.height===h;
+    const canvas=shared?r.source.canvas:document.createElement('canvas');
+    if(!shared){
+      canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d');
+      for(const r of rects)ctx.drawImage(r.source?r.source.canvas:atlas,r.sx,r.sy,r.rw,r.rh,r.x,r.y,r.rw,r.rh);
+    }
     canvas.sharable=true;this.refs.set(id,{canvas,quality});this.bytes+=w*h*4;this.next++;
     while(this.refs.size){const first=this.refs.keys().next().value;if(first+8>=this.next&&this.bytes<=32*1024*1024)break;const old=this.refs.get(first).canvas;this.bytes-=old.width*old.height*4;this.refs.delete(first);}
     return canvas;

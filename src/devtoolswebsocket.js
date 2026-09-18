@@ -1,6 +1,5 @@
 import './viewport.js';
 import './metadataCodec.js';
-import {TileStreamDecoder} from './tileStream.js';
 import './tileDelta.js';
 import {H264TileDecoder, Vp9TileDecoder, decodeImageTile} from './h264tiles.js';
 import './glyphcodec.js';
@@ -90,6 +89,7 @@ export class devToolsWebsocket extends WebSocket {
     });
     this.childSockets = [];
     this.receiveQueue = [];
+    this.receiveHead = 0;
     this.receiving = false;
     this.addEventListener('message', evt => {
       if (this.streamClosed) return;
@@ -100,9 +100,20 @@ export class devToolsWebsocket extends WebSocket {
   async drainMessages() {
     if (this.receiving) return;
     this.receiving = true;
+    let deadline=performance.now()+4;
     try {
-      while (this.receiveQueue.length) {
-        const pending = this.handleMessageData(this.receiveQueue.shift());
+      while (this.receiveHead < this.receiveQueue.length) {
+        if(performance.now()>=deadline){
+          await new Promise(resolve=>setTimeout(resolve,0));
+          deadline=performance.now()+4;
+          if(this.streamClosed)break;
+        }
+        if(this.receiveHead>=1024 && this.receiveHead*2>=this.receiveQueue.length){
+          this.receiveQueue.splice(0,this.receiveHead);this.receiveHead=0;
+        }
+        const data = this.receiveQueue[this.receiveHead];
+        this.receiveQueue[this.receiveHead++] = null;
+        const pending = this.handleMessageData(data);
         if (pending) await pending;
       }
     } catch (error) {
@@ -110,6 +121,8 @@ export class devToolsWebsocket extends WebSocket {
       console.error('PageStream: invalid tile stream', error);
       this.close(4002, 'Invalid tile stream');
     } finally {
+      this.receiveQueue.length = 0;
+      this.receiveHead = 0;
       this.receiving = false;
     }
   }
@@ -135,7 +148,7 @@ export class devToolsWebsocket extends WebSocket {
         if (bytes.length < 9 + mimeLength) {
           throw Error('PageStream: truncated binary tile frame');
         }
-        const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.slice(9, 9 + mimeLength)), bytes.slice(9 + mimeLength));
+        const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.subarray(9, 9 + mimeLength)), bytes.subarray(9 + mimeLength));
         const mime = decoded.mime, payload = decoded.bytes;
         if (mime === 'application/x-brisk-patch-atlas-v1') {
           return import('/patchAtlas.js').then(({PatchAtlasDecoder})=>{
@@ -145,8 +158,11 @@ export class devToolsWebsocket extends WebSocket {
           });
         }
         if (mime === 'application/x-brisk-stream-v1') {
-          if (!this.tileStreamDecoder) this.tileStreamDecoder = new TileStreamDecoder();
-          return this.tileStreamDecoder.decode(payload).then(canvas => {if (!this.streamClosed) this.binaryImages.set(id, canvas);});
+          return import('/tileStream.js').then(({TileStreamDecoder})=>{
+            if(this.streamClosed)return;
+            if(!this.tileStreamDecoder)this.tileStreamDecoder=new TileStreamDecoder();
+            return this.tileStreamDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
+          });
         }
         if (mime === 'video/webm') {
           if (!this.vp9Decoder) this.vp9Decoder = new Vp9TileDecoder();

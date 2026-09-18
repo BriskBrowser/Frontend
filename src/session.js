@@ -1324,6 +1324,9 @@ export class Session {
     this.requestAnimationFrameCallback = requestAnimationFrame(this.updateScreen.bind(this));
   }
   updateScreen() {
+    // Capture before even deleting old tiles: that alone can collapse a
+    // scroller and must never be mistaken for new compositor input.
+    this.captureLocalScrolls();
     this.requestAnimationFrameCallback = null;
     // updateScreen() only ever runs from a fresh 'PageStream.frameDone' (or
     // once, at initial domElement assignment, before any gesture could have
@@ -1570,8 +1573,6 @@ export class Session {
     this.sessionState.comittedLayerUpdates = [];
 
     if (!this.domElement_) return;
-
-    this.captureLocalScrolls();
 
     // Mark all transform nodes as adoptable
     var old_transform_tree = this.sessionState.transform_tree;

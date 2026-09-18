@@ -1101,9 +1101,18 @@ export class Session {
     var s = node && node.sticky;
     if (!s) return {x: 0, y: 0};
 
-    var scrollDom = s.scrollAncestor && s.scrollAncestor.transform_id && s.scrollAncestor.transform_id.dom;
-    var scrollX = scrollDom ? scrollDom.scrollLeft : 0;
-    var scrollY = scrollDom ? scrollDom.scrollTop : 0;
+    const xAncestor = s.xScrollAncestor === undefined ? s.scrollAncestor : s.xScrollAncestor;
+    const yAncestor = s.yScrollAncestor === undefined ? s.scrollAncestor : s.yScrollAncestor;
+    const xDom = xAncestor && xAncestor.transform_id && xAncestor.transform_id.dom;
+    const yDom = yAncestor && yAncestor.transform_id && yAncestor.transform_id.dom;
+    var scrollX = xDom ? xDom.scrollLeft : 0;
+    var scrollY = yDom ? yDom.scrollTop : 0;
+    const matchingAxes = (ancestor, offsets) => {
+      const a = ancestor.sticky;
+      const ax = a.xScrollAncestor === undefined ? a.scrollAncestor : a.xScrollAncestor;
+      const ay = a.yScrollAncestor === undefined ? a.scrollAncestor : a.yScrollAncestor;
+      return {x: ax === xAncestor ? offsets.x : 0, y: ay === yAncestor ? offsets.y : 0};
+    };
 
     var c = s.constraintBoxRect || [0, 0, 0, 0];
     var clipX = c[0] + scrollX, clipY = c[1] + scrollY, clipW = c[2], clipH = c[3];
@@ -1111,12 +1120,14 @@ export class Session {
     var ancestorStickyBox = {x: 0, y: 0};
     if (s.nearestNodeShiftingStickyBox) {
       this.stickyOffsetPx(s.nearestNodeShiftingStickyBox);
-      ancestorStickyBox = s.nearestNodeShiftingStickyBox.sticky.totalStickyBoxOffset || ancestorStickyBox;
+      ancestorStickyBox = matchingAxes(s.nearestNodeShiftingStickyBox,
+          s.nearestNodeShiftingStickyBox.sticky.totalStickyBoxOffset || ancestorStickyBox);
     }
     var ancestorContainingBlock = {x: 0, y: 0};
     if (s.nearestNodeShiftingContainingBlock) {
       this.stickyOffsetPx(s.nearestNodeShiftingContainingBlock);
-      ancestorContainingBlock = s.nearestNodeShiftingContainingBlock.sticky.totalContainingBlockOffset || ancestorContainingBlock;
+      ancestorContainingBlock = matchingAxes(s.nearestNodeShiftingContainingBlock,
+          s.nearestNodeShiftingContainingBlock.sticky.totalContainingBlockOffset || ancestorContainingBlock);
     }
 
     var sb = s.scrollContainerRelativeStickyBoxRect || [0, 0, 0, 0];
@@ -1167,7 +1178,8 @@ export class Session {
       y: ancestorStickyBox.y + ancestorContainingBlock.y + offY,
     };
 
-    return {x: Math.round(offX), y: Math.round(offY)};
+    const snap = s.pixelSnapOffset || [0, 0];
+    return {x: Math.round(offX + snap[0]), y: Math.round(offY + snap[1])};
   }
 
   // Called whenever a '.scroll' box actually moves (scrollHandler) --
@@ -1180,7 +1192,8 @@ export class Session {
   refreshStickyFor(scrolledTransformNode) {
     (this.sessionState.transform_tree || []).forEach(node => {
       if (!node || !node.sticky) return;
-      if (node.sticky.scrollAncestor && node.sticky.scrollAncestor.transform_id === scrolledTransformNode && node.dom) {
+      if ([node.sticky.scrollAncestor, node.sticky.xScrollAncestor, node.sticky.yScrollAncestor]
+          .some(ancestor => ancestor && ancestor.transform_id === scrolledTransformNode) && node.dom) {
         this.applyTransformCss(node);
       }
     });
@@ -1299,6 +1312,9 @@ export class Session {
       var s = propTrees.sticky_position_data[nodeIdStr];
       node.sticky = {
         scrollAncestor: scroll_tree[s.scrollAncestor],
+        xScrollAncestor: s.xScrollAncestor === undefined ? undefined : scroll_tree[s.xScrollAncestor] || null,
+        yScrollAncestor: s.yScrollAncestor === undefined ? undefined : scroll_tree[s.yScrollAncestor] || null,
+        pixelSnapOffset: s.pixelSnapOffset,
         nearestNodeShiftingStickyBox: transform_tree[s.nearestNodeShiftingStickyBox],
         nearestNodeShiftingContainingBlock: transform_tree[s.nearestNodeShiftingContainingBlock],
         isAnchoredLeft: s.isAnchoredLeft, isAnchoredRight: s.isAnchoredRight,

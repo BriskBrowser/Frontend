@@ -8,6 +8,7 @@
     <!-- Every startup module, so a slow link fetches them in parallel instead
          of one import level per round trip. URLs must match the imports
          exactly (test/module_graph.mjs checks). -->
+    <link rel='modulepreload' href='/forkDebug.js'>
     <link rel='modulepreload' href='/h264tiles.js'>
     <link rel='modulepreload' href='/metadataCodec.js'>
     <link rel='modulepreload' href='/viewport.js'>

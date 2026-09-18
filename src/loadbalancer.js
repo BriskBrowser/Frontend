@@ -34,7 +34,7 @@ export function selectWebsocket(websocketServer, websocketPool) {
         // Load.GetLoad's result) on a successful open -- a socket that
         // never opened never gets .load set at all -- so checking for
         // "is a number" (not "is truthy") is the correct filter.
-        let goodSocketPool = socketPool.filter(x => typeof x.load === 'number');
+        let goodSocketPool = socketPool.filter(x => typeof x.load === 'number' && x.ws.readyState === WebSocket.OPEN);
         goodSocketPool.sort((a,b) => a.load - b.load);
 
         socketPool.resolved = true;
@@ -46,18 +46,28 @@ export function selectWebsocket(websocketServer, websocketPool) {
       }
     }
     socketPool.forEach(s => {
+      const finish = error => {
+        if (s.done) return;
+        s.done = true;
+        clearTimeout(s.timer);
+        socketPool.doneCount++;
+        if (error) socketPool.lasterr = error;
+        else socketPool.highestOpen = Math.max(socketPool.highestOpen, s.id);
+        checkDone();
+      };
+      s.timer = setTimeout(() => finish(new Error('Browser connection timed out')), 15000);
       s.ws.onopen = async () => {
         try {
           s.load = socketPool.length==1?1:(await s.ws.req(undefined, 'Load.GetLoad', {}));
         } catch {
           s.load = 1;
         };
-        socketPool.doneCount++;
-        socketPool.highestOpen = Math.max(socketPool.highestOpen, s.id);
-        checkDone();
+        finish();
       };
-      s.ws.onerror = (err) => {socketPool.doneCount++; socketPool.lasterr=err; checkDone()};
+      s.ws.onerror = () => finish(new Error('Could not connect to the browser'));
+      s.ws.onclose = () => finish(new Error('Browser connection closed during startup'));
       if (s.ws.readyState === WebSocket.OPEN) s.ws.onopen();
+      else if (s.ws.readyState >= WebSocket.CLOSING) s.ws.onclose();
     });
   });
 }

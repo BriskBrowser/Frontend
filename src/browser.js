@@ -1,3 +1,4 @@
+import {ForkDebug} from './forkDebug.js';
 import {supportsH264Tiles, supportsVp9Tiles} from './h264tiles.js';
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
 import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
@@ -23,6 +24,8 @@ export class Browser {
     let wsPromise = selectWebsocket(this.options.websocketServer, this.options.websocketPool);
 
     var socket = this.socket = await wsPromise;
+
+    this.forkDebug = new ForkDebug(this);
 
     window.sessions = this.sessions;  // for testing
     socket.eventListeners['PageStream.sessionAvailable'] = params => {

@@ -1,4 +1,3 @@
-import {ForkDebug} from './forkDebug.js';
 import {supportsH264Tiles, supportsVp9Tiles} from './h264tiles.js';
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
 import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
@@ -28,7 +27,22 @@ export class Browser {
 
     var socket = this.socket = await wsPromise;
 
-    this.forkDebug = new ForkDebug(this);
+    // The renderer/debug panel stays out of the startup bundle and network.
+    window.addEventListener('keydown', async event => {
+      if (!event.altKey || !event.shiftKey || event.code !== 'KeyD' || event.repeat) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (this.debugLoading) return;
+      try {
+        this.debugLoading = true;
+        if (!this.forkDebug) {
+          const {ForkDebug} = await import('/forkDebug.js');
+          this.forkDebug = new ForkDebug(this);
+        }
+        this.forkDebug.toggle();
+      } catch (error) {console.error('Fork debug failed to load', error);}
+      finally {this.debugLoading = false;}
+    }, true);
 
     socket.addEventListener('close', () => this.showError('The browser connection was lost. Reload to reconnect.'));
     socket.eventListeners['PageStream.navigationFailed'] = params => {

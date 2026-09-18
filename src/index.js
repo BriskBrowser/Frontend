@@ -37,24 +37,10 @@ import {Browser} from './browser.js?v=20260912-perf1'
 const start = async () => {
   let b = new Browser(document.querySelector('#browser'), options)
 
-  // Real bugs, found by audit, fixed together: init() is async and does
-  // real work that can reject (e.g. selectWebsocket() finding no reachable
-  // pool server) -- this used to call it with neither await nor .catch(),
-  // so a failure was a silent unhandled promise rejection: the user was
-  // left staring at a permanently blank #browser div with zero visible
-  // indication anything went wrong. Separately, index.html already SHIPPED
-  // a "something's gone wrong" fallback message with no code anywhere that
-  // ever showed or hid it -- a plain sibling of #browser, so on any
-  // desktop-width viewport (see style.css's "Phone emulation for desktop
-  // browsers" media query) it rendered permanently, on every successful
-  // load too, not just on failure. Now hidden by default (index.html) and
-  // shown here specifically when init() actually fails -- giving that
-  // message the real, working, failure-only meaning its own text already
-  // implied.
+  // Initialization failures need the same visible recovery as later disconnects.
   b.init().catch(e => {
     console.error('Browser.init() failed:', e);
-    const fallback = document.getElementById('error-fallback');
-    if (fallback) fallback.style.display = '';
+    b.showError('Could not connect to the browser. Reload to try again.');
   });
 };
 if(document.readyState === 'loading') window.addEventListener('DOMContentLoaded', start, {once:true});

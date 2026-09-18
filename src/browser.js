@@ -143,7 +143,7 @@ export class Browser {
       });
       interactionTrace.record('navigate', {url: startupURL});
       const response = await sess.ws.req('Page.navigate', {url: startupURL});
-      if (response.errorText) this.showError('Could not load this page: ' + response.errorText);
+      if (response.errorText && response.errorText !== 'net::ERR_ABORTED') this.showError('Could not load this page: ' + response.errorText);
     };
 
     socket.eventListeners['Target.attachedToTarget'] = msg => initializeTarget(msg).catch(error => {

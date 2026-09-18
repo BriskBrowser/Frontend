@@ -18,6 +18,9 @@ export class Browser {
   }
 
   async init() {
+    // Redirect events can update the address while codecs/viewport initialize.
+    // The eager server navigation must be acknowledged with the original URL.
+    const startupURL = this.currentURL();
     // get the websocket loading early in the page load.
     const h264Supported = supportsH264Tiles();
     const vp9Supported = supportsVp9Tiles();
@@ -131,16 +134,16 @@ export class Browser {
       sess.bootstrapPreview = streamTiles; // startupMode disables client upgrades on a capable proxy.
       sess.ws.req('PageStream.enable', {
         fastStartup:true, cachedPreview:!!globalThis.briskPreview,
-        previewURL: this.currentURL(),
+        previewURL: startupURL,
         previewSeed: globalThis.briskPreview?.seed !== false && globalThis.briskPreview?.token,
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });
-      interactionTrace.record('navigate', {url: this.currentURL()});
-      const response = await sess.ws.req('Page.navigate', {url: this.currentURL()});
-      if (response.errorText) this.showError('Could not load this page: ' + response.errorText);
+      interactionTrace.record('navigate', {url: startupURL});
+      const response = await sess.ws.req('Page.navigate', {url: startupURL});
+      if (response.errorText && response.errorText !== 'net::ERR_ABORTED') this.showError('Could not load this page: ' + response.errorText);
     };
 
     socket.eventListeners['Target.attachedToTarget'] = msg => initializeTarget(msg).catch(error => {

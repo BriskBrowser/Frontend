@@ -635,6 +635,27 @@ export class Session {
     return '';
   }
 
+  // A scroller's scrollable extent is its scroll node's content bounds. It
+  // cannot come from the layers inside it: current Chromium sizes a layer to
+  // what was painted, not to the scroll extent (Chromium 87's scrolling
+  // contents layer spanned it), so a scroller whose content does not paint to
+  // its far edge would otherwise be too short, or not scroll at all.
+  applyScrollExtent(t) {
+    const bounds = t.scroll && t.scroll.bounds;
+    let extent = t.dom.scrollExtent;
+    if (!bounds) {
+      if (extent) extent.remove();
+      return;
+    }
+    if (!extent) {
+      extent = t.dom.scrollExtent = document.createElement('div');
+      extent.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;pointer-events:none';
+    }
+    if (extent.parentNode !== t.dom) t.dom.prepend(extent);
+    extent.style.width = bounds.width + 'px';
+    extent.style.height = bounds.height + 'px';
+  }
+
   createDOMTransformNode(t, zIndex, adopt) {
     if (t.parent_id) {
       if (!t.dom && adopt)
@@ -675,6 +696,7 @@ export class Session {
 
       t.dom.onscroll = t.scroll?this.scrollHandler.bind(this, t):undefined;
       t.dom.classList.toggle('scroll', !!t.scroll)
+      this.applyScrollExtent(t);
 
     } else {
       // Root transform is the one given when the class was constructed

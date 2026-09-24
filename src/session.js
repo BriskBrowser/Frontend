@@ -709,7 +709,10 @@ export class Session {
       Object.keys(l.targets).forEach(backendNodeId => {
         var t = l.targets[backendNodeId];
         // TODO:  Should take into account all the layer transforms and scroll positions
-        t.sessionId && t.containingQuads && this.onSessionSetHeight(t.sessionId, t.containingQuads[0][1])
+        // A target with no rendered box has an empty quad list; throwing here
+        // would abort the rest of updateScreen().
+        const quad = t.containingQuads && t.containingQuads[0];
+        t.sessionId && quad && this.onSessionSetHeight(t.sessionId, quad[1])
       })
     });
 

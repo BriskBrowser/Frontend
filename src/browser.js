@@ -36,7 +36,7 @@ export class Browser {
       try {
         this.debugLoading = true;
         if (!this.forkDebug) {
-          const {ForkDebug} = await import('/forkDebug.js');
+          const {ForkDebug} = await import('./forkDebug.js');
           this.forkDebug = new ForkDebug(this);
         }
         this.forkDebug.toggle();
@@ -147,9 +147,10 @@ export class Browser {
       socket.tileStreamNegotiated = streamTiles;
       sess.bootstrapPreview = streamTiles; // startupMode disables client upgrades on a capable proxy.
       sess.ws.req('PageStream.enable', {
-        fastStartup:true, cachedPreview:!!globalThis.briskPreview,
+        // The server never injects a cached startup preview (HttpHandler), so
+        // there is nothing to seed; previewSeed was always undefined (omitted).
+        fastStartup:true, cachedPreview:false,
         previewURL: startupURL,
-        previewSeed: globalThis.briskPreview?.seed !== false && globalThis.briskPreview?.token,
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
@@ -275,7 +276,7 @@ export class Browser {
   async activateMedia(sessionId) {
     if(typeof AudioDecoder !== 'function' || typeof VideoDecoder !== 'function')return;
     try {
-      const {MediaPlayback}=await (this.mediaModule ||= import('/mediaPlayback.js'));
+      const {MediaPlayback}=await (this.mediaModule ||= import('./mediaPlayback.js'));
       if(this.activeSession!==sessionId || this.socket.readyState>1)return;
       if(!this.media)this.media=new MediaPlayback(this.socket,this.rootElement);
       this.media.activate(sessionId);

@@ -1,4 +1,3 @@
-import {Vp9TileDecoder} from './h264tiles.js';
 // Physical-socket state: all forks share these references. Tile-store eviction
 // does not change codec residency, and canvas placement never moves these bases.
 export class TileStreamDecoder {
@@ -10,7 +9,12 @@ export class TileStreamDecoder {
     if (magic !== 0x31535442 || id !== this.next || !w || !h || w>4096 || h>4096 || w*h>4*1024*1024 || length!==bytes.length-40 || kind>4) throw Error('Tile stream bounds or sequence');
     const data=bytes.subarray(40);let canvas;
     if (kind===1) canvas=await this.video(data,slot,epoch,sequence,key,w,h);
-    else if (kind===2) {if(!this.vp9)this.vp9=new Vp9TileDecoder();canvas=await this.vp9.decode(data);}
+    else if (kind===2) {
+      // The VP9 decoder downloads with the first VP9 tile (the caller's
+      // receive loop is ordered, so later packets wait for this one).
+      if(!this.vp9){const {Vp9TileDecoder}=await import('./videoTiles.js');if(this.closed)throw Error('Tile stream closed');this.vp9=new Vp9TileDecoder();}
+      canvas=await this.vp9.decode(data);
+    }
     else if(kind>=3){const bitmap=await createImageBitmap(new Blob([data],{type:'image/webp'}));try{if(bitmap.width!==w||bitmap.height!==h)throw Error('Image dimensions changed');canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;canvas.getContext('2d').drawImage(bitmap,0,0);}finally{bitmap.close();}}
     else canvas=await this.patch(data,w,h,key);
     if (this.closed) throw Error('Tile stream closed');

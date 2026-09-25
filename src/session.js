@@ -222,7 +222,7 @@ export class Session {
     this.ws.eventListeners['PageStream.preview'] = msg => {
       const source=msg.binaryImageId===undefined?msg.image:this.ws.ws.takeBinaryImage(msg.binaryImageId);
       const generation=++this.previewGeneration;
-      import('/compactPreview.js').then(({CompactPreview})=>{
+      import('./compactPreview.js').then(({CompactPreview})=>{
         if(generation!==this.previewGeneration){if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);return;}
         if(!this.compactPreview)this.compactPreview=new CompactPreview();
         return this.compactPreview.set(msg,source,this.domElement_,()=>generation===this.previewGeneration).then(()=>{
@@ -503,7 +503,7 @@ export class Session {
 
       ele.appendChild(this.keyboard);
       this.updateKeyboard();
-      const installDesktop = () => import('/desktopInput.js').then(({DesktopInput}) => {
+      const installDesktop = () => import('./desktopInput.js').then(({DesktopInput}) => {
         if (this.domElement_ === ele && !this.desktopInput) this.desktopInput = new DesktopInput(this, ele);
       }).catch(error => console.error('Desktop input failed', error));
       if (globalThis.matchMedia?.('(any-pointer: fine)').matches) installDesktop();
@@ -1714,10 +1714,6 @@ export class Session {
         performance.mark('brisk:interactive-presented');
         globalThis.dispatchEvent(new CustomEvent('brisk:interactive',{detail:{sessionId:this.ws.sessionId,frame:this.lastBriskFrame?.briskFrame}}));
       }));
-      if (this.domElement_.classList.contains('active')) {
-        document.getElementById('startup-preview')?.remove();
-        globalThis.briskPreview = null;
-      }
     }
   }
 

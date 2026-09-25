@@ -225,7 +225,8 @@ export class Session {
       import('/compactPreview.js').then(({CompactPreview})=>{
         if(generation!==this.previewGeneration){if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);return;}
         if(!this.compactPreview)this.compactPreview=new CompactPreview();
-        return this.compactPreview.set(msg,source,this.domElement_).then(()=>{
+        return this.compactPreview.set(msg,source,this.domElement_,()=>generation===this.previewGeneration).then(()=>{
+          if(generation===this.previewGeneration)this.previewShownAt=performance.now();
           if(this.bootstrapPreview&&generation===this.previewGeneration){
             this.bootstrapPreview=false;
             return this.ws.req('PageStream.enable',{previewOnly:false,bytesPerFrame:999999999})

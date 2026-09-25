@@ -318,6 +318,13 @@ export class Session {
       if(!params.briskMetadataOnly)this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
       if (this.previewFrameHasLayers) this.clearPreviewAfterPaint = true;
+      // First frame of the destination after a navigation: its content, not
+      // the previous page's pixels kept on screen meanwhile, is now shown.
+      if (this.awaitingNavigationFrame && !params.briskMetadataOnly) {
+        this.awaitingNavigationFrame = false;
+        this.navigationFrameAt = performance.now();
+        requestAnimationFrame(() => performance.mark('brisk:navigation-presented'));
+      }
     };
 
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {
@@ -344,6 +351,15 @@ export class Session {
       if (params.frame && !params.frame.parentId && params.frame.url) {
         this.desktopInput?.reset();
         this.targetStatuses.clear();
+        this.awaitingNavigationFrame = true;
+        // The previous document's link regions name nodes that no longer
+        // exist. Its pixels stay until replaced; a tap on them reaches the
+        // new page at that point (PageStream.clickNode x/y) instead.
+        for (const l of this.sessionState.layer_tree || []) {
+          if (!l || !l.targets) continue;
+          for (const t of Object.values(l.targets)) t.dom && t.dom.remove();
+          l.targets = {};
+        }
         this.documentLoaded = false;
         this.currentURL = params.frame.url;
         this.onURLChange(this.currentURL);
@@ -976,7 +992,12 @@ export class Session {
         backendNodeId: evt.currentTarget.metadata.backendNodeId,
         linkText: evt.currentTarget.dataset.linkText || undefined,
       });
-      this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId } );
+      // The tap point travels with the node: if the node is gone by the time
+      // the click arrives (navigation, re-render), the server clicks whatever
+      // is at that point instead. A click is never dropped.
+      const point = Number.isFinite(evt.clientX) && Number.isFinite(evt.clientY) ?
+          {x: evt.clientX, y: evt.clientY} : {};
+      this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId, ...point } );
       evt.preventDefault();
     } else {
       delete evt.currentTarget.metadata.touchStarted;

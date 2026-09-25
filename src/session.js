@@ -984,6 +984,17 @@ export class Session {
     }
   }
 
+  // The parts of a hit region that change without its geometry changing.
+  applyTargetRegionState(region, t) {
+    region.metadata = t;
+    region.dataset.backendNodeId = t.backendNodeId;
+    if (this.options.showLinkOverlay) {
+      region.classList.add('link');
+      region.classList.toggle('alive', !!t.sessionId);
+    }
+    region.classList.toggle('preloaded', !!(t.sessionId && t.ready));
+  }
+
   createTargetNode(t, l) {
     if (!t.containingQuads) return;
     var container = l.dom.parentNode;
@@ -1000,8 +1011,19 @@ export class Session {
     t.dom.style.inset = '0';
     t.dom.style.pointerEvents = 'none';
     t.dom.metadata = t;
-    t.dom.replaceChildren();
     const automationText = (t.linkText || '').replace(/\s+/g, ' ').trim();
+    // Targets are re-sent with every frame, so a page that animates (a live
+    // counter, a clock) would otherwise rebuild the regions continuously. A
+    // replaced element under a resting pointer loses :hover until the next
+    // mouse move, and the hover highlight flickers. Keep the regions while
+    // their geometry and label are unchanged; refresh only their state.
+    const regionKey = JSON.stringify([t.containingQuads, automationText]);
+    if (t.dom.regionKey === regionKey) {
+      for (const region of t.dom.children) this.applyTargetRegionState(region, t);
+      return;
+    }
+    t.dom.regionKey = regionKey;
+    t.dom.replaceChildren();
     t.containingQuads.forEach((quad, quadIndex) => {
       if (!quad || quad.length < 8) return;
       const xs = [quad[0], quad[2], quad[4], quad[6]];
@@ -1031,11 +1053,7 @@ export class Session {
       // -- scroll blocking for pointer events is governed by touch-action.
       ['pointerdown', 'pointerup', 'pointercancel', 'pointermove'].forEach(evt =>
         region.addEventListener(evt.toLowerCase(), this.targetTouch.bind(this, evt)));
-      if (this.options.showLinkOverlay) {
-        region.classList.add('link');
-        region.classList.toggle('alive', !!t.sessionId);
-      }
-      region.classList.toggle('preloaded', !!(t.sessionId && t.ready));
+      this.applyTargetRegionState(region, t);
       t.dom.appendChild(region);
     });
     // Real, shipped highlight for speculatively-preloaded links -- distinct

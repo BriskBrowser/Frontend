@@ -37,7 +37,7 @@ export class devToolsWebsocket extends WebSocket {
     socket.initialize();
     if (early) {
       early.ws.removeEventListener('message', early.capture);
-      if (socket === early.ws) {socket.initialViewport=early.viewport;socket.receiveQueue.push(...early.messages);socket.drainMessages();}
+      if (socket === early.ws) {socket.initialViewport=early.viewport;for(const m of early.messages)socket.countReceived(m);socket.receiveQueue.push(...early.messages);socket.drainMessages();}
       else early.ws.close();
       delete globalThis.briskEarly;
     }
@@ -93,8 +93,11 @@ export class devToolsWebsocket extends WebSocket {
     this.receiveQueue = [];
     this.receiveHead = 0;
     this.receiving = false;
+    this.receivedBytes = 0;
+    this.reportedBytes = 0;
     this.addEventListener('message', evt => {
       if (this.streamClosed) return;
+      this.countReceived(evt.data);
       this.receiveQueue.push(evt.data);
       this.drainMessages();
     });
@@ -131,6 +134,18 @@ export class devToolsWebsocket extends WebSocket {
       this.receiveHead = 0;
       this.receiving = false;
     }
+  }
+  // Tell the proxy how much has arrived, so it keeps only about one round
+  // trip of data in flight and holds the rest where it can still be
+  // prioritised (the foreground page before hidden previews).
+  countReceived(data) {
+    this.receivedBytes += data.byteLength ?? data.length ?? 0;
+    if (this.receivedBytes - this.reportedBytes < 4096) return;
+    // Never disturb receiving: report only once this socket can encode
+    // requests; an unsent report is simply folded into the next one.
+    if (this.readyState !== 1 || (this.protocol === globalThis.BriskMetadata.protocol && !this.metadataEncoder)) return;
+    this.reportedBytes = this.receivedBytes;
+    try { this.req(undefined, 'Brisk.received', {bytes: this.receivedBytes}).catch(() => {}); } catch (_) {}
   }
   handleMessageData(data) {
       if (data instanceof ArrayBuffer) {

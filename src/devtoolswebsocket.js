@@ -1,8 +1,13 @@
 import './viewport.js';
 import './metadataCodec.js';
 import './tileDelta.js';
-import {H264TileDecoder, Vp9TileDecoder, decodeImageTile} from './h264tiles.js';
-import './glyphcodec.js';
+import {decodeImageTile} from './h264tiles.js';
+// Decoders for packet types a page may never send stay out of the startup
+// bundle. The first packet of that type awaits the import; the ordered receive
+// loop (drainMessages) holds every later packet until it has been handled.
+const videoTiles = () => import('./videoTiles.js');
+const glyphCodec = () => globalThis.BriskGlyphCodec ? Promise.resolve(globalThis.BriskGlyphCodec) :
+  import('./glyphcodec.js').then(() => globalThis.BriskGlyphCodec);
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
 export async function decodeVectorTile(bytes, format = 'gzip') {
@@ -50,7 +55,7 @@ export class devToolsWebsocket extends WebSocket {
     this.binaryType = 'arraybuffer';
     this.binaryImages = new Map();
     this.tileDelta = new globalThis.BriskTileDelta.Cache();
-    this.glyphDecoder = new globalThis.BriskGlyphCodec.Decoder();
+    this.glyphDecoder = null; // created with the first glyph packet
     this.streamClosed = false;
     this.addEventListener('close', event => {
       // One automatic recovery on codec/base failure: a new connection starts
@@ -172,34 +177,38 @@ export class devToolsWebsocket extends WebSocket {
         const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.subarray(9, 9 + mimeLength)), bytes.subarray(9 + mimeLength));
         const mime = decoded.mime, payload = decoded.bytes;
         if (mime === 'application/x-brisk-patch-atlas-v1') {
-          return import('/patchAtlas.js').then(({PatchAtlasDecoder})=>{
+          return import('./patchAtlas.js').then(({PatchAtlasDecoder})=>{
             if(this.streamClosed)return;
             if(!this.patchAtlasDecoder)this.patchAtlasDecoder=new PatchAtlasDecoder();
             return this.patchAtlasDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
           });
         }
         if (mime === 'application/x-brisk-stream-v1') {
-          return import('/tileStream.js').then(({TileStreamDecoder})=>{
+          // Via patchAtlas.js, which the bundled client preloads anyway: one
+          // module and request instead of a separate shared tileStream chunk.
+          return import('./patchAtlas.js').then(({TileStreamDecoder})=>{
             if(this.streamClosed)return;
             if(!this.tileStreamDecoder)this.tileStreamDecoder=new TileStreamDecoder();
             return this.tileStreamDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
           });
         }
-        if (mime === 'video/webm') {
-          if (!this.vp9Decoder) this.vp9Decoder = new Vp9TileDecoder();
-          return this.vp9Decoder.decode(payload).then(canvas => {
-            if (!this.streamClosed) this.binaryImages.set(id, canvas);
-          });
-        }
-        if (mime === 'video/h264') {
-          if (!this.h264Decoder) this.h264Decoder = new H264TileDecoder();
-          return this.h264Decoder.decode(payload).then(canvas => {
-            if (!this.streamClosed) this.binaryImages.set(id, canvas);
+        if (mime === 'video/webm' || mime === 'video/h264') {
+          return videoTiles().then(({H264TileDecoder, Vp9TileDecoder}) => {
+            // A decoder created after close would never be closed.
+            if (this.streamClosed) return;
+            const decoder = mime === 'video/webm' ? (this.vp9Decoder ||= new Vp9TileDecoder()) :
+              (this.h264Decoder ||= new H264TileDecoder());
+            return decoder.decode(payload).then(canvas => {
+              if (!this.streamClosed) this.binaryImages.set(id, canvas);
+            });
           });
         }
         if (mime === 'application/x-brisk-glyphs-v1+gzip') {
-          return decodeVectorTile(payload).then(blob => blob.arrayBuffer()).then(buffer => {
-            if (!this.glyphDecoder) return; // socket closed during decompression
+          // Decompression overlaps the (first-packet-only) codec download.
+          return Promise.all([glyphCodec(), decodeVectorTile(payload).then(blob => blob.arrayBuffer())]).then(([codec, buffer]) => {
+            if (this.streamClosed) return; // socket closed during decompression
+            // One dictionary per physical socket, like the server's encoder.
+            this.glyphDecoder ||= new codec.Decoder();
             const svg = this.glyphDecoder.decode(new Uint8Array(buffer));
             return decodeImageTile(new Blob([svg], {type: 'image/svg+xml'})).then(canvas => {
               if (!this.streamClosed) this.binaryImages.set(id, canvas);
@@ -222,16 +231,6 @@ export class devToolsWebsocket extends WebSocket {
       return this.dispatchMessage(JSON.parse(data));
   }
   dispatchMessage(d) {
-      if(d.method === 'PageStream.seedAtlas') {
-        const p=globalThis.briskPreview;
-        if(!p || p.token!==d.params.token)throw Error('Missing startup seed');
-        return Promise.all([p.ready,import('/patchAtlas.js')]).then(([image,{PatchAtlasDecoder}])=>{
-          if(this.streamClosed)return;
-          if(this.patchAtlasDecoder)throw Error('Late startup seed');
-          this.patchAtlasDecoder=new PatchAtlasDecoder();
-          this.patchAtlasDecoder.seed(image);
-        });
-      }
       if (d.method === 'PageStream.tileDictionaryReset') {
         this.tileDelta = new globalThis.BriskTileDelta.Cache();
         return;

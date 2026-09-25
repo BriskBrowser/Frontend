@@ -1,5 +1,7 @@
 import {TileStreamDecoder} from './tileStream.js';
 import {assertDisjoint} from './rectCoverage.js';
+// Streams without the atlas load their decoder through this module too.
+export {TileStreamDecoder};
 
 // References contain exactly what this connection displayed, including codec
 // loss. Never reconstruct copies from the server's uncompressed source pixels.

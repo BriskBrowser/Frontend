@@ -1490,6 +1490,7 @@ export class Session {
             var r = (packed >>> 24) & 0xff, g = (packed >>> 16) & 0xff,
                 b = (packed >>> 8) & 0xff, a = packed & 0xff;
             domImage = document.createElement('div');
+            domImage.className = 'solid-tile';
             // createDOMLayerImages() below also sets the `width`/`height`
             // *properties* (meaningful for <img>, a no-op expando on a
             // <div>) -- set the real CSS size here instead.

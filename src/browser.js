@@ -86,6 +86,9 @@ export class Browser {
     // response from a request.  The intention is a server can fire
     // off all these requests to the browser before the client even
     // connects to speed up initial loading.
+    socket.eventListeners['PageStream.mediaAvailable'] = params => {
+      if (String(params.sessionId) === String(this.activeSession)) this.activateMedia(this.activeSession);
+    };
     socket.eventListeners['PageStream.timing']=params=>performance.mark('brisk:server:'+params.stage,{detail:{elapsed:params.elapsed}});
 
     socket.eventListeners['Target.targetCreated'] = msg => {
@@ -297,7 +300,9 @@ export class Browser {
     this.sessions[sessionId].domElement = elem;
 
     this.activeSession = sessionId;
-    this.activateMedia(sessionId);
+    // A running player follows the active tab; otherwise the server announces
+    // media (PageStream.mediaAvailable) before the player is loaded at all.
+    if (this.media) this.activateMedia(sessionId);
     if (destinationURL) this.sessions[sessionId].currentURL = destinationURL;
     // A speculative session normally completed its navigation while hidden,
     // so its frameNavigated event was correctly ignored by the address bar.

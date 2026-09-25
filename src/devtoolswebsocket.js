@@ -8,6 +8,13 @@ import {decodeImageTile} from './h264tiles.js';
 const videoTiles = () => import('./videoTiles.js');
 const glyphCodec = () => globalThis.BriskGlyphCodec ? Promise.resolve(globalThis.BriskGlyphCodec) :
   import('./glyphcodec.js').then(() => globalThis.BriskGlyphCodec);
+// Fetch them as soon as the first page is on screen: the sharp pass (glyph
+// tiles) usually follows at once, and loading on first use would stall the
+// ordered stream for a round trip exactly then.
+globalThis.addEventListener?.('brisk:interactive', () => {
+  glyphCodec().catch(() => {});
+  videoTiles().catch(() => {});
+}, {once: true});
 // Bounded decoding of self-contained SVG tiles: the server supplies shaped
 // glyph paths and an embedded raster background, never executable page markup.
 export async function decodeVectorTile(bytes, format = 'gzip') {

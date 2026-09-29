@@ -42,7 +42,7 @@ export class TileStreamDecoder {
       state.decoder=new VideoDecoder({error:error=>{if(state.pending)state.pending.fail(error);},output:frame=>{
         try {const pending=state.pending;if(!pending)return;
           if(frame.timestamp!==pending.sequence||frame.displayWidth!==Math.ceil(pending.w/16)*16||frame.displayHeight!==Math.ceil(pending.h/16)*16)throw Error('Video frame identity changed');
-          const canvas=document.createElement('canvas');canvas.width=pending.w;canvas.height=pending.h;canvas.getContext('2d',{alpha:false}).drawImage(frame,0,0);pending.finish(canvas);
+          const drawStart=performance.now(),canvas=document.createElement('canvas');canvas.width=pending.w;canvas.height=pending.h;canvas.getContext('2d',{alpha:false}).drawImage(frame,0,0);(globalThis.briskVideoDraw||(globalThis.briskVideoDraw=[])).push({at:drawStart,ms:performance.now()-drawStart,w:pending.w,h:pending.h});if(globalThis.briskVideoDraw.length>400)globalThis.briskVideoDraw.splice(0,100);pending.finish(canvas);
         } catch(error){if(state.pending)state.pending.fail(error);} finally {frame.close();}
       }});
       try {state.decoder.configure({codec,optimizeForLatency:true,hardwareAcceleration:'prefer-software'});}catch(error){state.decoder.close();throw error;}

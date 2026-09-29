@@ -297,8 +297,17 @@ export class Browser {
     var elem = document.createElement('bb-session');
     this.rootElement.appendChild(elem);
     elem.classList.add('active');
-    this.activeSession && (this.sessions[this.activeSession].domElement = null);
+    // The session being left stays on screen, underneath, until the one being shown has painted.
+    // A fork the reader tapped before it was ready is promoted while it is still loading, and
+    // showing it at once would be a blank page where the old one was.
+    const previous = this.activeSession && this.sessions[this.activeSession];
+    const veil = previous && previous !== this.sessions[sessionId] && previous.domElement_ || null;
+    if (veil) {
+      veil.classList.remove('active');
+      veil.classList.add('veil');
+    } else if (previous) previous.domElement = null;
     this.sessions[sessionId].domElement = elem;
+    if (veil) this.releaseVeil(previous, veil, elem, sessionId);
 
     this.activeSession = sessionId;
     // A running player follows the active tab; otherwise the server announces
@@ -311,6 +320,19 @@ export class Browser {
     if (this.sessions[sessionId].currentURL)
       this.committedURLChanged(sessionId, this.sessions[sessionId].currentURL);
     this.arrangeSessions();
+  }
+
+  // Drops the previous session's element once |elem| shows pixels (or after ten seconds, or as
+  // soon as another session has been activated over it).
+  releaseVeil(previous, veil, elem, sessionId) {
+    const started = performance.now();
+    const check = () => {
+      const done = elem.querySelector('canvas, img') || performance.now() - started > 10000 ||
+          String(this.activeSession) !== String(sessionId) || previous.domElement_ !== veil;
+      if (!done) return requestAnimationFrame(check);
+      if (previous.domElement_ === veil) previous.domElement = null;
+    };
+    requestAnimationFrame(check);
   }
 
   addSession(sessionId, existingSession) {

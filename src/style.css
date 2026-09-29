@@ -3,6 +3,13 @@ bb-session.old-active {
   filter: brightness(50%);
   z-index: 0;
 }
+/* The page being left, kept on screen under the one being shown until that one has painted. */
+bb-session.veil {
+  transform: inherit;
+  z-index: 0;
+  display: block;
+  pointer-events: none;
+}
 bb-session.active {
   transform: inherit;
   z-index: 1;

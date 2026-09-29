@@ -1,3 +1,7 @@
+// Video decoders this client keeps, one per H264 stream slot. It advertises the
+// number as tileStreamSlots when it enables the stream (browser.js); the server
+// never uses more, and uses four for a client that does not say.
+export const TILE_STREAM_SLOTS = 16;
 // Physical-socket state: all forks share these references. Tile-store eviction
 // does not change codec residency, and canvas placement never moves these bases.
 export class TileStreamDecoder {
@@ -26,7 +30,7 @@ export class TileStreamDecoder {
     return canvas;
   }
   video(data,slot,epoch,sequence,key,w,h) {
-    if(slot>=4 || key>1)throw Error('Invalid video stream');
+    if(slot>=TILE_STREAM_SLOTS || key>1)throw Error('Invalid video stream');
     let state=this.streams.get(slot);
     if(!state||state.epoch!==epoch){
       if(!key||sequence!==0)throw Error('Missing video reset frame');

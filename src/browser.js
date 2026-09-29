@@ -156,6 +156,7 @@ export class Browser {
         previewURL: startupURL,
         fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
         streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
+        tileStreamSlots: 16, // TILE_STREAM_SLOTS in tileStream.js
         glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
         vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
       });

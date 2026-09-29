@@ -16,6 +16,7 @@ export class PatchAtlasDecoder {
   }
   async decode(bytes) {
     if(this.closed || bytes.length<32)throw Error('Invalid patch atlas');
+    const traceStart=performance.now();
     const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
     const [magic,id,w,h,quality,metaSize,imageSize,flags]=Array.from({length:8},(_,i)=>v.getUint32(i*4,true));
     if(magic!==0x31415042||id!==this.next||!w||!h||w>4096||h>4096||w*h>4*1024*1024||quality>100||flags>1||metaSize>128*1024||32+metaSize+imageSize!==bytes.length)throw Error('Patch atlas bounds or sequence');
@@ -42,7 +43,9 @@ export class PatchAtlasDecoder {
     }
     if(area!==w*h||!!imageSize!==!!novel)throw Error('Incomplete atlas coverage');
     assertDisjoint(rects,w);
+    const traceMeta=performance.now();
     let atlas=imageSize?await this.images.decode(bytes.subarray(32+metaSize)):null;
+    const traceDecoded=performance.now();
     if(this.closed)throw Error('Patch atlas closed');
     if(atlas&&(atlas.width!==aw||atlas.height!==ah))throw Error('Atlas image dimensions changed');
     if(flags){
@@ -52,14 +55,24 @@ export class PatchAtlasDecoder {
       const combined=document.createElement('canvas');combined.width=aw;combined.height=colorHeight;
       combined.getContext('2d').putImageData(new ImageData(color,aw,colorHeight),0,0);atlas=combined;
     }
+    let firstDrawMs=0;
     const r=rects[0];
     const shared=rects.length===1 && r.source && !r.sx && !r.sy &&
       r.source.canvas.width===w && r.source.canvas.height===h;
     const canvas=shared?r.source.canvas:document.createElement('canvas');
     if(!shared){
       canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d');
-      for(const r of rects)ctx.drawImage(r.source?r.source.canvas:atlas,r.sx,r.sy,r.rw,r.rh,r.x,r.y,r.rw,r.rh);
+      let first=true;
+      for(const r of rects){
+        const t=first?performance.now():0;
+        ctx.drawImage(r.source?r.source.canvas:atlas,r.sx,r.sy,r.rw,r.rh,r.x,r.y,r.rw,r.rh);
+        if(first){firstDrawMs=performance.now()-t;first=false;}
+      }
     }
+    // Per-message cost on the main thread, for the frame-pacing probe (bounded ring).
+    const traceEnd=performance.now(),ring=globalThis.briskAtlasTrace||(globalThis.briskAtlasTrace=[]);
+    ring.push({at:traceStart,w,h,rects:rects.length,novel,bytes:bytes.length,metaMs:traceMeta-traceStart,decodeWaitMs:traceDecoded-traceMeta,compositeMs:traceEnd-traceDecoded,firstDrawMs,shared});
+    if(ring.length>400)ring.splice(0,ring.length-400);
     canvas.sharable=true;this.refs.set(id,{canvas,quality});this.bytes+=w*h*4;this.next++;
     while(this.refs.size){const first=this.refs.keys().next().value;if(first+8>=this.next&&this.bytes<=32*1024*1024)break;const old=this.refs.get(first).canvas;this.bytes-=old.width*old.height*4;this.refs.delete(first);}
     return canvas;

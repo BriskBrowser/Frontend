@@ -699,8 +699,6 @@ export class Session {
       }
       t.dom.classList.add('t');
       t.dom.setAttribute('t'+t.id, '');
-      if (oldZIndex != t.zIndex)
-        t.dom.style.zIndex = t.zIndex;
 
       if (t.clip) {
         t.dom.style.width = t.clip.clip[2] + 'px';
@@ -1136,6 +1134,20 @@ export class Session {
   // neither path can drift from what toCss() actually needs.
   applyTransformCss(t) {
     t.dom.style.transform = this.toCss(t.local, t.origin, t.post_translation, this.stickyOffsetPx(t));
+    // Layers are ordered by one global draw order (`layer.zIndex`), but they
+    // live in per-transform-node elements. An element with a `z-index` is a
+    // stacking context, which flattens everything inside it into a single slot
+    // in that order: a node holding the page's white root background (order 0)
+    // and its fixed header (order 6) was given z-index 6, so the background
+    // painted over the scrolling content (order 1) and Pinterest, Twitch and
+    // Stack Overflow showed only their header over white.
+    //
+    // So only a node that is a stacking context anyway -- one with a CSS
+    // transform -- keeps a z-index (the best a single element can do). Every
+    // other node (scroll frames, clips, identity transforms) leaves it `auto`,
+    // and its layers take their own z-index in the enclosing context, which
+    // interleaves them with other nodes' layers exactly as the compositor does.
+    t.dom.style.zIndex = t.dom.style.transform && t.zIndex !== undefined ? t.zIndex : '';
   }
 
   // Port of cc::TransformTree::StickyPositionOffset (property_tree.cc),

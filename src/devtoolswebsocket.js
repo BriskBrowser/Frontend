@@ -160,6 +160,7 @@ export class devToolsWebsocket extends WebSocket {
     try { this.req(undefined, 'Brisk.received', {bytes: this.receivedBytes}).catch(() => {}); } catch (_) {}
   }
   handleMessageData(data) {
+      this.wireBytes_ = data instanceof ArrayBuffer ? data.byteLength : (data && data.length) || 0;
       if (data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(data);
         if (globalThis.BriskMetadata.isFrame(bytes)) {
@@ -238,6 +239,10 @@ export class devToolsWebsocket extends WebSocket {
       return this.dispatchMessage(JSON.parse(data));
   }
   dispatchMessage(d) {
+      // Bounded ring for the frame-pacing/first-paint probes (test/run_popular_site.js): what arrived, when, and how large on the wire.
+      const ring = globalThis.briskMsgTrace || (globalThis.briskMsgTrace = []);
+      ring.push({at: performance.now(), method: d.method || (d.id !== undefined ? 'reply' : '?'), bytes: this.wireBytes_ || 0});
+      if (ring.length > 600) ring.splice(0, ring.length - 400);
       if (d.method === 'PageStream.tileDictionaryReset') {
         this.tileDelta = new globalThis.BriskTileDelta.Cache();
         return;

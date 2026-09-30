@@ -3,6 +3,9 @@ import {assertDisjoint} from './rectCoverage.js';
 // Streams without the atlas load their decoder through this module too.
 export {TileStreamDecoder};
 
+// Longest stretch of composite work before the browser gets to render (about a third of a 60 Hz frame).
+const SLICE_MS=5;
+const yieldToRenderer=()=>globalThis.scheduler&&globalThis.scheduler.yield?globalThis.scheduler.yield():new Promise(resolve=>setTimeout(resolve,0));
 // References contain exactly what this connection displayed, including codec
 // loss. Never reconstruct copies from the server's uncompressed source pixels.
 export class PatchAtlasDecoder {
@@ -62,11 +65,19 @@ export class PatchAtlasDecoder {
     const canvas=shared?r.source.canvas:document.createElement('canvas');
     if(!shared){
       canvas.width=w;canvas.height=h;const ctx=canvas.getContext('2d');
-      let first=true;
+      let first=true,sliceStart=performance.now();
       for(const r of rects){
         const t=first?performance.now():0;
         ctx.drawImage(r.source?r.source.canvas:atlas,r.sx,r.sy,r.rw,r.rh,r.x,r.y,r.rw,r.rh);
         if(first){firstDrawMs=performance.now()-t;first=false;}
+        // A message can carry over a thousand rectangles (a page of scrolled-in references): drawn in
+        // one go that is a 60-100 ms task and a dropped frame or six. Let the browser render between
+        // slices; messages are handled in order, so nothing overtakes this one.
+        if(!globalThis.briskNoSlice && performance.now()-sliceStart>SLICE_MS){
+          await yieldToRenderer();
+          if(this.closed)throw Error('Patch atlas closed');
+          sliceStart=performance.now();
+        }
       }
     }
     // Per-message cost on the main thread, for the frame-pacing probe (bounded ring).

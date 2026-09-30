@@ -217,9 +217,11 @@ export class devToolsWebsocket extends WebSocket {
             if (this.streamClosed) return; // socket closed during decompression
             // One dictionary per physical socket, like the server's encoder.
             this.glyphDecoder ||= new codec.Decoder();
-            const svg = this.glyphDecoder.decode(new Uint8Array(buffer));
-            return decodeImageTile(new Blob([svg], {type: 'image/svg+xml'})).then(canvas => {
-              if (!this.streamClosed) this.binaryImages.set(id, canvas);
+            // A first dictionary is 80-120 ms of arithmetic decoding: sliced, the frames around it are not dropped.
+            const decoded = globalThis.briskNoSlice ? Promise.resolve(this.glyphDecoder.decode(new Uint8Array(buffer)))
+              : this.glyphDecoder.decodeAsync(new Uint8Array(buffer), () => globalThis.scheduler && globalThis.scheduler.yield ? globalThis.scheduler.yield() : new Promise(resolve => setTimeout(resolve, 0)));
+            return decoded.then(svg => this.streamClosed ? undefined : decodeImageTile(new Blob([svg], {type: 'image/svg+xml'}))).then(canvas => {
+              if (canvas && !this.streamClosed) this.binaryImages.set(id, canvas);
             });
           });
         }

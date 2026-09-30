@@ -86,7 +86,10 @@
 
   // Binary arithmetic coder, adaptive prefix-tree contexts plus the previous
   // byte's high bit. Integer interval arithmetic stays below 2^53 in JS.
-  function arithmetic(bytes, length) {
+  // The coder as a generator that yields every 256 output bytes while decoding, so a caller with a frame
+  // to render can slice a large dictionary (80-120 ms in one go) instead of blocking; arithmetic() below
+  // runs it to completion for everyone else.
+  function* arithmeticSteps(bytes, length) {
     const decoding = length !== undefined;
     check(bytes.length <= MAX_PACKET && (!decoding || length <= MAX_PACKET), 'arithmetic size');
     const zero = new Uint16Array(1024).fill(1), one = new Uint16Array(1024).fill(1);
@@ -127,12 +130,16 @@
         }
         prefix = prefix * 2 + bit; value = value * 2 + bit;
       }
-      prev = value; if (decoding) decoded[i] = value;
+      prev = value; if (decoding) {decoded[i] = value; if ((i & 255) === 255) yield;}
     }
     if (decoding) return decoded;
     pending++; emit(low < QUARTER ? 0 : 1);
     if (bits) output.push(byte << (8 - bits));
     return Uint8Array.from(output);
+  }
+  function arithmetic(bytes, length) {
+    const steps = arithmeticSteps(bytes, length);
+    for (let step = steps.next(); ; step = steps.next()) if (step.done) return step.value;
   }
   function splitSVG(svg) {
     const start = svg.indexOf('<defs>'), end = svg.indexOf('</defs>');
@@ -186,6 +193,24 @@
   class Decoder {
     constructor() {this.paths = new Map(); this.bytes = 0;}
     decode(bytes) {
+      const p = this.parse(bytes);
+      return this.finish(p, p.mode ? arithmetic(p.coded, p.rawLength) : p.coded);
+    }
+    // Same result, but the arithmetic step gives the browser a turn every ~|sliceMs|.
+    async decodeAsync(bytes, yieldToRenderer, sliceMs = 5) {
+      const p = this.parse(bytes);
+      let raw = p.coded;
+      if (p.mode) {
+        const steps = arithmeticSteps(p.coded, p.rawLength);
+        let sliceStart = performance.now();
+        for (let step = steps.next(); ; step = steps.next()) {
+          if (step.done) {raw = step.value; break;}
+          if (performance.now() - sliceStart > sliceMs) {await yieldToRenderer(); sliceStart = performance.now();}
+        }
+      }
+      return this.finish(p, raw);
+    }
+    parse(bytes) {
       check(bytes.length <= MAX_PACKET, 'packet too large');
       const r = new Reader(bytes);
       check(Array.from(r.take(4)).join(',') === '71,76,89,2', 'version');
@@ -194,7 +219,10 @@
       check(rawLength <= MAX_PACKET, 'dictionary packet too large');
       const coded = r.take(codedLength);
       check(mode || rawLength === codedLength, 'raw length');
-      const raw = new Reader(mode ? arithmetic(coded, rawLength) : coded);
+      return {r, mode, rawLength, coded};
+    }
+    finish({r}, rawBytes) {
+      const raw = new Reader(rawBytes);
       const count = raw.uint(), staged = new Map(); let addedBytes = 0;
       check(count <= MAX_GLYPHS - this.paths.size, 'connection dictionary full');
       for (let i = 0; i < count; i++) {

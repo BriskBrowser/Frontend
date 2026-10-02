@@ -1,25 +1,11 @@
 import './viewport.js';
 import './metadataCodec.js';
-import './tileDelta.js';
-import {decodeImageTile} from './h264tiles.js';
-// Decoders for packet types a page may never send stay out of the startup
-// bundle. The first packet of that type awaits the import; the ordered receive
-// loop (drainMessages) holds every later packet until it has been handled.
-const videoTiles = () => import('./videoTiles.js');
-const glyphCodec = () => globalThis.BriskGlyphCodec ? Promise.resolve(globalThis.BriskGlyphCodec) :
-  import('./glyphcodec.js').then(() => globalThis.BriskGlyphCodec);
-// Fetch them as soon as the first page is on screen: the sharp pass (glyph
-// tiles) usually follows at once, and loading on first use would stall the
-// ordered stream for a round trip exactly then.
-globalThis.addEventListener?.('brisk:interactive', () => {
-  glyphCodec().catch(() => {});
-  videoTiles().catch(() => {});
-}, {once: true});
-// Bounded decoding of self-contained SVG tiles: the server supplies shaped
-// glyph paths and an embedded raster background, never executable page markup.
-export async function decodeVectorTile(bytes, format = 'gzip') {
+import {GsStream} from './gs/stream.js';
+
+// Bounded inflate for compressed BRM1 metadata frames.
+export async function inflateBounded(bytes, format = 'deflate') {
   const maximum = 16 * 1024 * 1024;
-  if (bytes.byteLength > maximum) throw new Error('Vector tile exceeds compressed size limit');
+  if (bytes.byteLength > maximum) throw new Error('Compressed metadata exceeds size limit');
   const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format)).getReader();
   const chunks = [];
   let size = 0;
@@ -28,7 +14,7 @@ export async function decodeVectorTile(bytes, format = 'gzip') {
       const {value, done} = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > maximum) throw new Error('Vector tile exceeds decoded size limit');
+      if (size > maximum) throw new Error('Metadata exceeds decoded size limit');
       chunks.push(value);
     }
   } catch (error) {
@@ -37,7 +23,7 @@ export async function decodeVectorTile(bytes, format = 'gzip') {
   } finally {
     reader.releaseLock();
   }
-  return new Blob(chunks, {type: 'image/svg+xml'});
+  return new Blob(chunks).arrayBuffer();
 }
 
 // Implements the chrome devtools protocol on top of a websocket.
@@ -56,34 +42,18 @@ export class devToolsWebsocket extends WebSocket {
     return socket;
   }
   initialize(){
-    this.req=this.req.bind(this);this.takeBinaryImage=this.takeBinaryImage.bind(this);
+    this.req=this.req.bind(this);
     this.metadataEncoder = new globalThis.BriskMetadata.Codec();
     this.metadataDecoder = new globalThis.BriskMetadata.Codec();
     this.binaryType = 'arraybuffer';
-    this.binaryImages = new Map();
-    this.tileDelta = new globalThis.BriskTileDelta.Cache();
-    this.glyphDecoder = null; // created with the first glyph packet
     this.streamClosed = false;
-    this.addEventListener('close', event => {
-      // One automatic recovery on codec/base failure: a new connection starts
-      // with independent tiles, so no stale prediction history can survive.
-      if (this.tileStreamNegotiated && [1002,1011,1013,4002].includes(event.code)) {
-        try {if (sessionStorage.getItem('briskTileStreamRecovery') !== '1') {sessionStorage.setItem('briskTileStreamRecovery','1');location.reload();}} catch (_) {}
-      }
+    this.addEventListener('close', () => {
       this.streamClosed = true;
       for (const callback of this.callbacks) if (callback) callback.reject(new Error('Browser connection closed'));
       this.callbacks = [];
-      for (const source of this.binaryImages.values())
-        if (typeof source === 'string') URL.revokeObjectURL(source);
-      if (this.tileStreamDecoder) this.tileStreamDecoder.close();
-      if (this.patchAtlasDecoder) this.patchAtlasDecoder.close();
-      if (this.h264Decoder) this.h264Decoder.close();
-      if (this.vp9Decoder) this.vp9Decoder.close();
-      this.binaryImages.clear();
+      this._gs?.close();
       this.metadataEncoder = null;
       this.metadataDecoder = null;
-      this.glyphDecoder = null;
-      this.tileDelta = null;
       this.receiveQueue.length = 0;
     });
     this.nextid=0;
@@ -159,84 +129,28 @@ export class devToolsWebsocket extends WebSocket {
     this.reportedBytes = this.receivedBytes;
     try { this.req(undefined, 'Brisk.received', {bytes: this.receivedBytes}).catch(() => {}); } catch (_) {}
   }
+  // The stream's pixel/text decoders and compositor. Created on first use so a
+  // page that never streams pixels loads none of it.
+  get gs() {
+    return this._gs ||= new GsStream();
+  }
   handleMessageData(data) {
       this.wireBytes_ = data instanceof ArrayBuffer ? data.byteLength : (data && data.length) || 0;
       if (data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(data);
+        // Stream packets (docs/gpu-stream-wire.md): pixels, text, control.
+        if (bytes.length && bytes[0] === 0xB7) return this.gs.handle(bytes);
         if (globalThis.BriskMetadata.isFrame(bytes)) {
           if (bytes[4] === 0) return this.dispatchMessage(this.metadataDecoder.decode(bytes));
           if (bytes[4] !== 2) throw Error('Unknown metadata compression');
-          return decodeVectorTile(bytes.subarray(5), 'deflate').then(blob => blob.arrayBuffer()).then(buffer => {
+          return inflateBounded(bytes.subarray(5), 'deflate').then(buffer => {
             if (this.streamClosed) return;
             const packet = new Uint8Array(5 + buffer.byteLength);
             packet.set([66,82,77,49,0]); packet.set(new Uint8Array(buffer),5);
             this.dispatchMessage(this.metadataDecoder.decode(packet));
           });
         }
-        const view = new DataView(data);
-        if (bytes.length < 9 || view.getUint32(0) !== 0x42524953) {
-          throw Error('PageStream: invalid binary tile frame');
-        }
-        const id = view.getUint32(4);
-        const mimeLength = bytes[8];
-        if (bytes.length < 9 + mimeLength) {
-          throw Error('PageStream: truncated binary tile frame');
-        }
-        const decoded = this.tileDelta.decode(new TextDecoder().decode(bytes.subarray(9, 9 + mimeLength)), bytes.subarray(9 + mimeLength));
-        const mime = decoded.mime, payload = decoded.bytes;
-        if (mime === 'application/x-brisk-patch-atlas-v1') {
-          return import('./patchAtlas.js').then(({PatchAtlasDecoder})=>{
-            if(this.streamClosed)return;
-            if(!this.patchAtlasDecoder)this.patchAtlasDecoder=new PatchAtlasDecoder();
-            return this.patchAtlasDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
-          });
-        }
-        if (mime === 'application/x-brisk-stream-v1') {
-          // Via patchAtlas.js, which the bundled client preloads anyway: one
-          // module and request instead of a separate shared tileStream chunk.
-          return import('./patchAtlas.js').then(({TileStreamDecoder})=>{
-            if(this.streamClosed)return;
-            if(!this.tileStreamDecoder)this.tileStreamDecoder=new TileStreamDecoder();
-            return this.tileStreamDecoder.decode(payload).then(canvas=>{if(!this.streamClosed)this.binaryImages.set(id,canvas);});
-          });
-        }
-        if (mime === 'video/webm' || mime === 'video/h264') {
-          return videoTiles().then(({H264TileDecoder, Vp9TileDecoder}) => {
-            // A decoder created after close would never be closed.
-            if (this.streamClosed) return;
-            const decoder = mime === 'video/webm' ? (this.vp9Decoder ||= new Vp9TileDecoder()) :
-              (this.h264Decoder ||= new H264TileDecoder());
-            return decoder.decode(payload).then(canvas => {
-              if (!this.streamClosed) this.binaryImages.set(id, canvas);
-            });
-          });
-        }
-        if (mime === 'application/x-brisk-glyphs-v1+gzip') {
-          // Decompression overlaps the (first-packet-only) codec download.
-          return Promise.all([glyphCodec(), decodeVectorTile(payload).then(blob => blob.arrayBuffer())]).then(([codec, buffer]) => {
-            if (this.streamClosed) return; // socket closed during decompression
-            // One dictionary per physical socket, like the server's encoder.
-            this.glyphDecoder ||= new codec.Decoder();
-            // A first dictionary is 80-120 ms of arithmetic decoding: sliced, the frames around it are not dropped.
-            const decoded = globalThis.briskNoSlice ? Promise.resolve(this.glyphDecoder.decode(new Uint8Array(buffer)))
-              : this.glyphDecoder.decodeAsync(new Uint8Array(buffer), () => globalThis.scheduler && globalThis.scheduler.yield ? globalThis.scheduler.yield() : new Promise(resolve => setTimeout(resolve, 0)));
-            return decoded.then(svg => this.streamClosed ? undefined : decodeImageTile(new Blob([svg], {type: 'image/svg+xml'}))).then(canvas => {
-              if (canvas && !this.streamClosed) this.binaryImages.set(id, canvas);
-            });
-          });
-        }
-        if (mime === 'image/svg+xml+gzip') {
-          // Metadata must not overtake decompression or image decoding.
-          // The ordered receive queue waits until pixels can be placed
-          // synchronously, just as it does for video tiles.
-          return decodeVectorTile(payload).then(decodeImageTile).then(canvas => {
-            if (!this.streamClosed) this.binaryImages.set(id, canvas);
-          });
-        }
-        const blob = new Blob([payload], {type: mime});
-        return decodeImageTile(blob).then(canvas => {
-          if (!this.streamClosed) this.binaryImages.set(id, canvas);
-        });
+        throw Error('PageStream: unknown binary frame');
       }
       return this.dispatchMessage(JSON.parse(data));
   }
@@ -245,10 +159,6 @@ export class devToolsWebsocket extends WebSocket {
       const ring = globalThis.briskMsgTrace || (globalThis.briskMsgTrace = []);
       ring.push({at: performance.now(), method: d.method || (d.id !== undefined ? 'reply' : '?'), bytes: this.wireBytes_ || 0});
       if (ring.length > 600) ring.splice(0, ring.length - 400);
-      if (d.method === 'PageStream.tileDictionaryReset') {
-        this.tileDelta = new globalThis.BriskTileDelta.Cache();
-        return;
-      }
       if (this.callbacks[d.id]) {
         if (d.result)
           this.callbacks[d.id].resolve(d.result);
@@ -265,11 +175,6 @@ export class devToolsWebsocket extends WebSocket {
       }
       this.childSockets.forEach(x=>x.handleMessage(d));
   } 
-  takeBinaryImage(id) {
-    const src = this.binaryImages.get(id);
-    this.binaryImages.delete(id);
-    return src;
-  }
   req(sessionId, method, params) {
     return new Promise((resolve, reject) => {
       // Normalize optional fields exactly as the legacy JSON request did.

@@ -1,4 +1,4 @@
-import {supportsH264Tiles, supportsVp9Tiles} from './h264tiles.js';
+import {probeCaps} from './gs/caps.js';
 import {devToolsWebsocket, devToolsSession} from './devtoolswebsocket.js?v=20260912-perf1'
 import {selectWebsocket} from './loadbalancer.js?v=20260912-perf1'
 import {Session} from './session.js?v=20260912-perf1'
@@ -21,8 +21,7 @@ export class Browser {
     // The eager server navigation must be acknowledged with the original URL.
     const startupURL = this.currentURL();
     // get the websocket loading early in the page load.
-    const h264Supported = supportsH264Tiles();
-    const vp9Supported = supportsVp9Tiles();
+    const capsPromise = probeCaps();
     let wsPromise = selectWebsocket(this.options.websocketServer, this.options.websocketPool);
 
     var socket = this.socket = await wsPromise;
@@ -48,12 +47,16 @@ export class Browser {
     socket.eventListeners['PageStream.navigationFailed'] = params => {
       this.showError('Could not load this page: ' + (params.message || 'Navigation failed'));
     };
+    // A stream layer appearing is what lets its session build the layer's element.
+    socket.gs.compositor.onLayerCreated = source => {
+      for (const session of Object.values(this.sessions)) if (session.sourceId === source) session.gsLayerChanged();
+    };
     window.sessions = this.sessions;  // for testing
     socket.eventListeners['PageStream.sessionAvailable'] = params => {
-      this.addSession(params.sessionId, null);
+      this.addSession(params.sessionId, null, params.sourceId);
     };
     socket.eventListeners['PageStream.activateSession'] = params => {
-      this.addSession(params.sessionId, null);
+      this.addSession(params.sessionId, null, params.sourceId);
       if (String(this.activeSession) !== String(params.sessionId))
         this.sessionActivate(params.sessionId);
     };
@@ -128,7 +131,7 @@ export class Browser {
       // TODO:  Handle case of multiple targets/sessions/windows etc.
       console.log("new target", msg);
 
-      var sess = this.addSession(msg.sessionId, null);
+      var sess = this.addSession(msg.sessionId, null, msg.sourceId ?? msg.targetInfo.sourceId);
       if (!sess) return;   // duplicate attach for a session we already have
       sess.targetId = msg.targetInfo.targetId;
       this.sessionActivate(msg.sessionId);
@@ -140,25 +143,11 @@ export class Browser {
       socket.initialViewport=null;
 
       sess.ws.req('Page.enable', {});
-      // Proxy-only capability: SocketHandler strips binaryTiles before
-      // forwarding this command to Chromium. Negotiated clients receive tile
-      // payloads as binary WebSocket frames and Blob URLs instead of paying
-      // Base64 expansion/decoding in JSON.
-      const h264Tiles = await h264Supported;
-      const vp9Tiles = h264Tiles && vp9Supported;
-      const streamTiles = h264Tiles && vp9Tiles && typeof DecompressionStream === 'function' && localStorage.getItem('briskTileStream') !== '0' && sessionStorage.getItem('briskTileStreamRecovery') !== '1';
-      socket.tileStreamNegotiated = streamTiles;
-      sess.bootstrapPreview = streamTiles; // startupMode disables client upgrades on a capable proxy.
+      // Proxy-only capability: the proxy hands `gpuStream` to the stream
+      // service, which chooses codecs from it (docs/gpu-stream-wire.md).
       sess.ws.req('PageStream.enable', {
-        // The server never injects a cached startup preview (HttpHandler), so
-        // there is nothing to seed; previewSeed was always undefined (omitted).
-        fastStartup:true, cachedPreview:false,
-        previewURL: startupURL,
-        fps: 0, targetBandwidth: 999999999, binaryTiles: true, h264Tiles, vp9Tiles, tileDelta: true,
-        streamTiles, patchAtlas: streamTiles, compactPreview: streamTiles, previewOnly: streamTiles,
-        tileStreamSlots: 16, // TILE_STREAM_SLOTS in tileStream.js
-        glyphDictionary: typeof DecompressionStream === 'function' ? 'curves-v1' : 'none',
-        vectorTileCompression: typeof DecompressionStream === 'function' ? 'gzip' : 'none'
+        fps: 0, targetBandwidth: 999999999,
+        gpuStream: await capsPromise,
       });
       interactionTrace.record('navigate', {url: startupURL});
       const response = await sess.ws.req('Page.navigate', {url: startupURL});
@@ -335,14 +324,20 @@ export class Browser {
     requestAnimationFrame(check);
   }
 
-  addSession(sessionId, existingSession) {
-    if (this.sessions[sessionId]) return;
+  addSession(sessionId, existingSession, sourceId) {
+    if (this.sessions[sessionId]) {
+      // sessionAvailable may follow an earlier attach that did not know the source.
+      const known = this.sessions[sessionId];
+      if (sourceId !== undefined && known.sourceId === undefined) {known.sourceId = sourceId; known.gsLayerChanged();}
+      return;
+    }
     
     
     var ws = new devToolsSession(this.socket, sessionId);
 
     var sess = new Session(ws, existingSession, this.options);
     sess.targetId = existingSession && existingSession.targetId;
+    sess.sourceId = sourceId;
     this.sessions[sessionId] = sess;
 
     

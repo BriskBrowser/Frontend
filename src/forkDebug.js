@@ -171,6 +171,11 @@ export function renderMini(session, mount, viewport) {
   renderer.options = {};
   renderer.targetStatuses = new Map();
   renderer.updateTargetHeights = () => {};
+  // The live compositor owns the layer canvases; a miniature draws copies.
+  renderer.attachLayerPixels = l => {
+    const view = l.dom && session.gsCompositor()?.layer(session.sourceId, Number(l.layerId));
+    if (view && !l.dom.querySelector('canvas')) l.dom.append(copyPixels(view.root));
+  };
   renderer.createTargetNode = () => {};
   renderer.scrollHandler = () => {};
   renderer.applyServerScroll = node => {
@@ -181,5 +186,4 @@ export function renderMini(session, mount, viewport) {
     }
   };
   renderer.updateScreen();
-  if (session.compactPreview?.canvas) root.append(copyPixels(session.compactPreview.canvas));
 }

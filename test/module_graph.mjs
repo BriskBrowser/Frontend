@@ -10,13 +10,14 @@ const preloads = new Set([...html.matchAll(/rel='modulepreload' href='\/([^']+)'
 const seen = new Map(), queue = [entry];
 while (queue.length) {
   const url = queue.shift(), file = url.split('?')[0];
+  const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/') + 1) : '';
   if (seen.has(file)) {
     assert.equal(seen.get(file), url, `${file} imported as both ${seen.get(file)} and ${url}`);
     continue;
   }
   seen.set(file, url);
   const source = fs.readFileSync(new URL(file, src), 'utf8');
-  for (const m of source.matchAll(/^import\s+(?:[^'"]+from\s+)?['"]\.\/([^'"]+)['"]/gm)) queue.push(m[1]);
+  for (const m of source.matchAll(/^import\s+(?:[^'"]+from\s+)?['"]\.\/([^'"]+)['"]/gm)) { const u = new URL(m[1], 'http://x/' + dir); queue.push(u.pathname.slice(1) + u.search); }
 }
 const reachable = new Set([...seen.values()].filter(url => url !== entry));
 assert.deepEqual([...preloads].sort(), [...reachable].sort(), 'modulepreload list must equal the startup graph');

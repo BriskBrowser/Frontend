@@ -8,10 +8,14 @@
     <!-- Every startup module, so a slow link fetches them in parallel instead
          of one import level per round trip. URLs must match the imports
          exactly (test/module_graph.mjs checks). -->
-    <link rel='modulepreload' href='/h264tiles.js'>
     <link rel='modulepreload' href='/metadataCodec.js'>
+    <link rel='modulepreload' href='/gs/caps.js'>
+    <link rel='modulepreload' href='/gs/stream.js'>
+    <link rel='modulepreload' href='/gs/dispatcher.js'>
+    <link rel='modulepreload' href='/gs/surface.js'>
+    <link rel='modulepreload' href='/gs/compositor.js'>
+    <link rel='modulepreload' href='/gs/textHost.js'>
     <link rel='modulepreload' href='/viewport.js'>
-<link rel='modulepreload' href='/tileDelta.js'>
 <link rel='modulepreload' href='/browser.js?v=20260912-perf1'>
     <link rel='modulepreload' href='/session.js?v=20260912-perf1'>
     <link rel='modulepreload' href='/devtoolswebsocket.js?v=20260912-perf1'>

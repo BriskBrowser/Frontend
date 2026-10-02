@@ -1,17 +1,6 @@
-import {tileElement} from './h264tiles.js';
 import {deepClone} from './deepclone.js'
 import {interactionTrace} from './interactionTrace.js?v=20260827-trace1'
 import {applyPropTreePatch} from './propTreePatch.js'
-
-// Session-global cache of tile bytes by content id (server-computed hash of
-// the tile's pixels), shared across every layer and every Session in this
-// tab -- including a session promoted from a speculative fork, which is
-// exactly the case this exists for. The server omits `image` from a
-// BufferUpdate whenever it believes this client already holds the bytes for
-// `tileId` (a resize/split/repeated motif/navigation/promoted fork reusing
-// content already sent); this cache is where those bytes actually live so
-// they can be reused instead of re-fetched. See docs/tile-transport.md.
-const tileStore = new Map();
 
 // Keys forwarded to the real page as genuine CDP key events (see
 // keyboardKeyHandler below) rather than through the value-mirroring
@@ -31,115 +20,6 @@ const SPECIAL_KEY_CODES = {
   Home: {code: 36, domCode: 'Home'},
   End: {code: 35, domCode: 'End'},
 };
-
-// --- Tile region arithmetic -------------------------------------------------
-//
-// A BufferUpdate's raster is a *complete* re-raster of its clip rect of the
-// layer, not a diff of what changed inside it (verified live: the small
-// "16,39,133,20" stats-text update tile carries the card's own translucent
-// background at exactly the same alpha as the full-card tile underneath it,
-// not just the glyphs). That is what makes it legal to take the pixels
-// underneath a new tile away entirely -- see updateScreen()'s cull.
-
-function rectRight(r) { return r.x + r.width; }
-function rectBottom(r) { return r.y + r.height; }
-
-// Does `outer` completely cover `inner`?
-function rectContains(outer, inner) {
-  return inner.x >= outer.x && inner.y >= outer.y &&
-         rectRight(inner) <= rectRight(outer) && rectBottom(inner) <= rectBottom(outer);
-}
-
-// The overlapping part of two rects, or null if they don't overlap.
-function rectIntersect(a, b) {
-  var x = Math.max(a.x, b.x), y = Math.max(a.y, b.y);
-  var r = Math.min(rectRight(a), rectRight(b)), bt = Math.min(rectBottom(a), rectBottom(b));
-  if (r <= x || bt <= y) return null;
-  return {x: x, y: y, width: r - x, height: bt - y};
-}
-
-// `a` minus `b`, as up to four *disjoint* rects (top band, bottom band, then
-// left and right of the overlap between them). Disjointness is not a detail:
-// the clip-path built from these uses ordinary nonzero winding, so two hole
-// rects that overlapped each other would cancel back to "filled" and
-// resurrect the very pixels they were meant to erase.
-function rectSubtract(a, b) {
-  var overlap = rectIntersect(a, b);
-  if (!overlap) return [a];
-  var out = [];
-  if (overlap.y > a.y)
-    out.push({x: a.x, y: a.y, width: a.width, height: overlap.y - a.y});
-  if (rectBottom(overlap) < rectBottom(a))
-    out.push({x: a.x, y: rectBottom(overlap), width: a.width, height: rectBottom(a) - rectBottom(overlap)});
-  if (overlap.x > a.x)
-    out.push({x: a.x, y: overlap.y, width: overlap.x - a.x, height: overlap.height});
-  if (rectRight(overlap) < rectRight(a))
-    out.push({x: rectRight(overlap), y: overlap.y, width: rectRight(a) - rectRight(overlap), height: overlap.height});
-  return out;
-}
-
-// Glue back together hole rects that share a whole edge. Without this, a
-// region that repaints at a slowly-changing width (the stats page's CPU
-// progress bar walks 129px -> 139px and back, one pixel at a time) would add
-// a fresh one-pixel-wide sliver to the hole list on every single frame and
-// grow it without bound for as long as the page stays open.
-function coalesceRects(rects) {
-  for (var again = true; again; ) {
-    again = false;
-    outer:
-    for (var i = 0; i < rects.length; i++) {
-      for (var j = i + 1; j < rects.length; j++) {
-        var a = rects[i], b = rects[j], merged = null;
-        if (a.x === b.x && a.width === b.width &&
-            (rectBottom(a) === b.y || rectBottom(b) === a.y))
-          merged = {x: a.x, y: Math.min(a.y, b.y), width: a.width, height: a.height + b.height};
-        else if (a.y === b.y && a.height === b.height &&
-            (rectRight(a) === b.x || rectRight(b) === a.x))
-          merged = {x: Math.min(a.x, b.x), y: a.y, width: a.width + b.width, height: a.height};
-        if (merged) {
-          rects.splice(j, 1);
-          rects[i] = merged;
-          again = true;
-          break outer;
-        }
-      }
-    }
-  }
-  return rects;
-}
-
-// Erase `hole` (in layer coordinates) from a tile entry. Returns true once
-// nothing of the tile is left visible, so the caller can drop it outright.
-function punchTileHole(entry, hole) {
-  entry.holes = entry.holes || [];
-  var pieces = [hole];
-  entry.holes.forEach(h => {
-    pieces = pieces.reduce((acc, p) => acc.concat(rectSubtract(p, h)), []);
-  });
-  if (pieces.length) {
-    entry.holes = coalesceRects(entry.holes.concat(pieces));
-    entry.holesChanged = true;
-  }
-  var covered = entry.holes.reduce((n, h) => n + h.width * h.height, 0);
-  return covered >= entry.clip.width * entry.clip.height;
-}
-
-// The tile's own rect with every hole cut out of it, in the element's local
-// (border-box) coordinates. Holes are wound the opposite way round from the
-// outer rect so plain nonzero winding drops them; that avoids depending on
-// path()'s optional `evenodd` argument being parsed, and is only correct
-// because punchTileHole() keeps the holes disjoint.
-function clipPathForTile(entry) {
-  if (!entry.holes || !entry.holes.length) return '';
-  var w = entry.clip.width, h = entry.clip.height;
-  var d = 'M0,0 L' + w + ',0 L' + w + ',' + h + ' L0,' + h + ' Z';
-  entry.holes.forEach(o => {
-    var x = o.x - entry.clip.x, y = o.y - entry.clip.y;
-    d += ' M' + x + ',' + y + ' L' + x + ',' + (y + o.height) +
-         ' L' + (x + o.width) + ',' + (y + o.height) + ' L' + (x + o.width) + ',' + y + ' Z';
-  });
-  return 'path("' + d + '")';
-}
 
 // Network counterpart of cc/base/synced_property.h (AdditionGroup).
 // The active tree draws base + delta. A pending renderer commit replaces the
@@ -216,28 +96,9 @@ export class Session {
       this.sessionState = deepClone(baseSession.sessionState);
     }
 
-    this.ws.eventListeners['PageStream.startupMode']=params=>{this.bootstrapPreview=!params.serverUpgrade;};
-    this.previewGeneration = 0;
-    this.ws.eventListeners['PageStream.frameStart'] = () => {this.previewFrameHasLayers=false;};
-    this.ws.eventListeners['PageStream.preview'] = msg => {
-      const source=msg.binaryImageId===undefined?msg.image:this.ws.ws.takeBinaryImage(msg.binaryImageId);
-      const generation=++this.previewGeneration;
-      import('./compactPreview.js').then(({CompactPreview})=>{
-        if(generation!==this.previewGeneration){if(typeof source==='string'&&source.startsWith('blob:'))URL.revokeObjectURL(source);return;}
-        if(!this.compactPreview)this.compactPreview=new CompactPreview();
-        return this.compactPreview.set(msg,source,this.domElement_,()=>generation===this.previewGeneration).then(()=>{
-          if(generation===this.previewGeneration)this.previewShownAt=performance.now();
-          if(this.bootstrapPreview&&generation===this.previewGeneration){
-            this.bootstrapPreview=false;
-            return this.ws.req('PageStream.enable',{previewOnly:false,bytesPerFrame:999999999})
-              .then(()=>this.ws.req('PageStream.flush',{}));
-          }
-        });
-      }).catch(error=>{
-        console.error('PageStream: invalid compact preview',error);
-        this.ws.ws.close(4002,'Invalid compact preview');
-      });
-    };
+    // Layer pixels and text arrive as stream packets (src/gs/); `sourceId`
+    // (set by Browser) names this session's source in them.
+    this.ws.eventListeners['PageStream.frameStart'] = () => {this.frameHasLayers=false;};
 
     this.targetStatuses=new Map();
     this.ws.eventListeners['PageStream.targetStatus']=({layerUpdate})=>{
@@ -254,24 +115,12 @@ export class Session {
     };
 
     this.ws.eventListeners['PageStream.streamLayerInfo'] =  msg => {
-      this.previewFrameHasLayers = true;
-      this.resolveBinaryTiles(msg.layerUpdate);
+      this.frameHasLayers = true;
       this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
       // Create any sessions for event target clicks, because they could start sending data right away.
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
         x.sessionId && this.onNewSession(x.sessionId, this)
       });
-      // Paint initial and tile-only updates progressively. Once a layout is
-      // visible, keep structural replacements together through frameDone:
-      // deleting old layers before their replacements arrive exposes white
-      // holes, even while the origin document is still loading (BBC News).
-      const update = msg.layerUpdate;
-      const structural = u => u.layerInfo || u.layerDeleted || u.zIndex !== undefined;
-      const pendingStructure = this.sessionState.nextProptrees ||
-        this.sessionState.nextLayerUpdates.some(structural);
-      if (this.domElement_ && update.bufferUpdates && !structural(update) &&
-          (!this.sessionState.comittedProptrees || !pendingStructure))
-        this.commitPendingUpdates();
     };
 
     // `this.lastPropertyTreesJSON` is the raw string form of whatever
@@ -307,7 +156,7 @@ export class Session {
     
     this.ws.eventListeners['PageStream.frameDone'] = (params={}) => {
       this.lastBriskFrame=params;
-      if(params.briskFrame)this.ws.req('PageStream.clientReady',{frame:params.briskFrame,generation:params.briskGeneration,interactive:!!this.previewFrameHasLayers});
+      if(params.briskFrame)this.ws.req('PageStream.clientReady',{frame:params.briskFrame,generation:params.briskGeneration,interactive:!!this.frameHasLayers});
       // Required by the protocol (browser_protocol.pdl: "Must be sent by
       // the client once per frameDone") but was never actually implemented
       // client-side -- previously harmless because nothing server-side
@@ -318,7 +167,7 @@ export class Session {
       // bookkeeping below, so the server sees it as promptly as possible.
       if(!params.briskMetadataOnly)this.ws.req('PageStream.ackFrame', {});
       this.commitPendingUpdates(true);
-      if (this.previewFrameHasLayers) this.clearPreviewAfterPaint = true;
+      if (this.frameHasLayers) this.interactivePending = true;
       // First frame of the destination after a navigation: its content, not
       // the previous page's pixels kept on screen meanwhile, is now shown.
       if (this.awaitingNavigationFrame && !params.briskMetadataOnly) {
@@ -375,90 +224,6 @@ export class Session {
 
   }
 
-  // Turns every `binaryImageId` reference in a just-arrived layerUpdate into a
-  // plain, reusable `image` Blob URL, immediately, in WebSocket receive order.
-  //
-  // A binary tile is a ONE-SHOT ticket: SocketHandler.js sends the tile's
-  // bytes as a single binary WebSocket frame directly before the JSON
-  // metadata naming it, and devToolsWebsocket.takeBinaryImage() deletes the
-  // entry on the first read, so the id can only ever be redeemed once.
-  //
-  // This used to be redeemed lazily, in updateScreen(), which is far too late.
-  // A layerUpdate sits in sessionState.nextLayerUpdates until the next
-  // frameDone commits it, and in that window this session hands `this` to
-  // onNewSession() for every click target the same update carries -- and the
-  // Session constructor deep-clones the base session's whole sessionState,
-  // pending tile updates included. Each speculative session therefore
-  // inherited a copy of the same not-yet-redeemed ticket. Whichever session
-  // painted first redeemed it; every other one got undefined and logged
-  // "binary tile N was not received before its metadata" -- a badly misleading
-  // message, because the bytes had in fact arrived perfectly on time and in
-  // the right order. The affected tile was then simply dropped, leaving a
-  // hole in that session's page, and (because the bytes never reached
-  // tileStore under their content id) any later cross-session dedup reference
-  // to the same tile missed too: "tileId ... referenced but not in local
-  // tileStore".
-  //
-  // Redeeming here, exactly once, at the only point where "before its
-  // metadata" is a meaningful claim, makes the clone inherit real image bytes
-  // instead of a spent ticket, and restores the ordering guarantee the error
-  // message was written to check. Note this must run before the
-  // onNewSession() calls below it, not after.
-  resolveBinaryTiles(layerUpdate) {
-    var updates = layerUpdate && layerUpdate.bufferUpdates;
-    if (!updates) return;
-    updates.forEach(bufUpdate => {
-      if (bufUpdate.binaryImageId !== undefined) {
-        var src = this.ws.ws.takeBinaryImage(bufUpdate.binaryImageId);
-        if (src === undefined) {
-          // Now a genuine transport-ordering violation (or a tile whose binary
-          // frame was addressed to a session that no longer exists), not the
-          // self-inflicted double-redeem this function exists to remove.
-          console.error('PageStream: binary tile', bufUpdate.binaryImageId,
-                        'was not received before its metadata');
-          delete bufUpdate.binaryImageId;
-          return;
-        }
-        delete bufUpdate.binaryImageId;
-        bufUpdate.image = src;
-      }
-
-      // Real bug, found live: cache on RECEIPT, not on paint.
-      //
-      // updateScreen() also populates tileStore, but only for tiles it
-      // actually paints -- and that is strictly later, and strictly fewer
-      // tiles, than the set the server believes we hold. SocketHandler.js's
-      // dedupTileReferences() adds a tile to `forwardedTileIds` the instant
-      // it puts the bytes on the wire, and that Set is shared across every
-      // browser in the fork tree ("whichever fork's tile arrives first
-      // wins"). So the server's contract is "I sent you these bytes once,
-      // you have them forever".
-      //
-      // The client was breaking that contract for any tile received but
-      // never painted, and speculative execution makes that the common case:
-      // a fork rasters a tile, the server forwards the bytes to that fork's
-      // session and marks the id forwarded, the fork then loses the click
-      // race and is destroyed with its layerUpdates still sitting unpainted
-      // in nextLayerUpdates. The bytes are gone. When the winning fork later
-      // rasters the same furniture, the server strips the payload and sends
-      // the bare tileId -- and the client logs "tileId ... referenced but
-      // not in local tileStore (cache miss)" and drops the tile, leaving a
-      // stale or blank region.
-      //
-      // Measured against production, misses scaled with fork count exactly
-      // as that predicts: /home (1 session) 0 misses, example.com (2) 5,
-      // wikipedia (5) 10, bbc.com (5) many -- and bbc.com rendered visibly
-      // washed out because of the dropped tiles. Storing here, at the one
-      // point every tile's bytes are known to have arrived, makes the
-      // client's cache mirror `forwardedTileIds` exactly.
-      //
-      // Same Map, same content-addressed keys, so this is idempotent with
-      // updateScreen()'s own store: re-storing an identical id is a no-op.
-      if (bufUpdate.image && bufUpdate.tileId)
-        tileStore.set(bufUpdate.tileId, bufUpdate.image);
-    });
-  }
-
   // Tiles arrive before frameDone, and a complex page can spend well over a
   // second finishing the rest of that frame. Once property trees exist, the
   // updates already received are independently renderable; paint them on the
@@ -490,7 +255,6 @@ export class Session {
     // DOM. A preview-only fork may receive no new property trees before it
     // is promoted, so adoption must rebuild that state into the new root.
     if (ele) this.fullUpdateRequired = true;
-    if(this.compactPreview)this.compactPreview.attach(ele);
     if (ele) {
       ['touchStart', 'touchEnd', 'touchCancel', 'touchMove'].forEach(evt =>
         ele.addEventListener(evt.toLowerCase(), this.touch.bind(this, evt), {passive: true}));
@@ -731,7 +495,7 @@ export class Session {
       })
     });
 
-    if (this.sessionState.layer_tree.some(l => l && l.images && l.images.length)) {
+    if (this.gsCompositor()?.hasPixels(this.sourceId)) {
       const warmPreview = document.getElementById('warm-preview');
       if (warmPreview) warmPreview.remove();
     }
@@ -809,31 +573,18 @@ export class Session {
     this.sendScrollDelta(t, state);
   }
 
-  createDOMLayerImages(l) {
-    l.images && l.images.forEach(i => {
-      if (i.dom.activeInLayer != l) {
-        // TODO:  i.dom is shared with other sessions - implement some kind of refcounting & duplication here.
-        l.dom.appendChild(i.dom);
-        i.dom.style.position = 'absolute';
-        i.dom.style.top = i.clip.y + 'px';
-        i.dom.style.left = i.clip.x + 'px';
-        // CSS scales the tile without resizing (and clearing) a decoded canvas.
-        i.dom.style.width = i.clip.width + 'px';
-        i.dom.style.height = i.clip.height + 'px';
-        i.dom.activeInLayer = l;
-        i.holesChanged = true;
-      }
-      // Cut out whatever a newer tile has since taken over (updateScreen's
-      // cull). Done here rather than at punch time for the same reason the
-      // positioning above is: i.dom can be shared with a cloned speculative
-      // session, and only the layer that currently owns it in the DOM may
-      // write to it -- the other session re-applies its own holes if and
-      // when it adopts the element (which flips activeInLayer above).
-      if (i.holesChanged && i.dom.activeInLayer == l) {
-        i.dom.style.clipPath = clipPathForTile(i);
-        i.holesChanged = false;
-      }
-    });
+  // The compositor owns the layer's pixel and text canvases (src/gs/); this
+  // only parents them under the layer's element, where the property-tree
+  // transforms, clips and opacity built here apply to them.
+  gsCompositor() { return this.ws?.ws?._gs?.compositor; }
+  attachLayerPixels(l) {
+    if (this.sourceId === undefined || !l.dom) return;
+    this.gsCompositor()?.attach(this.sourceId, Number(l.layerId), l.dom);
+  }
+  // A layer's stream state was created: its element may be buildable now.
+  gsLayerChanged() {
+    this.fullUpdateRequired = true;
+    this.scheduleUpdateScreen();
   }
   // Port of cc::LayerDrawOpacity (draw_property_utils.cc): the opacity a
   // layer's own raster needs when composited is the product of every
@@ -862,7 +613,7 @@ export class Session {
   }
 
   createDOMLayerNode(l) {
-    if (!l.images || l.name == 'Frame Overlay Content Layer') return;
+    if (!this.gsCompositor()?.layer(this.sourceId, Number(l.layerId)) || l.name == 'Frame Overlay Content Layer') return;
 
     // Huh - looks like a scrollingcontents layer.  If so, set everything up appropriately
     // `scroll_tree_index.transform_id` is resolved from the scroll tree's own
@@ -890,7 +641,7 @@ export class Session {
       l.transform_tree_index.dom.appendChild(l.dom);
     }
     
-    this.createDOMLayerImages(l);
+    this.attachLayerPixels(l);
 
     // offsetToTransformParent is expressed relative to the transform node's
     // own property-tree origin -- but when that node carries a .clip (see
@@ -1460,169 +1211,6 @@ export class Session {
       if (params.zIndex !== undefined)
         l.zIndex=params.zIndex;
 
-      if (params.bufferUpdates) {
-        l.images = l.images || [];
-
-        params.bufferUpdates.forEach(bufUpdate => {
-          var domImage;
-          // No binaryImageId branch here: resolveBinaryTiles() has already
-          // turned every one into a plain `image` Blob URL at receive time
-          // (see its comment -- redeeming the one-shot id this late is what
-          // made cloned speculative sessions fight over the same tile).
-          if (bufUpdate.image) {
-            domImage = tileElement(bufUpdate.image);
-            // Indicates this HTMLElement can be referenced from multiple sessions.
-            domImage.sharable = true;
-            if (bufUpdate.tileId) tileStore.set(bufUpdate.tileId, bufUpdate.image);
-          } else if (bufUpdate.srcTileId !== undefined) {
-            // Motion-vector reference ("blit", docs/tile-transport.md
-            // Section 4a): this tile's content is a verified byte-exact
-            // crop of an already-cached tile. Checked *before* the plain
-            // tileId branch below even though a blit response also
-            // carries its own `tileId` -- srcTileId is the more specific
-            // signal and must win, or this would be misrouted into the
-            // exact-match path, which would look up this tile's own
-            // (not-yet-cached) id instead of resolving the reference.
-            //
-            // dx/dy/rasterWidth/rasterHeight are all in the cached source
-            // image's *natural* pixel space, deliberately not CSS pixels:
-            // drawImage()'s 9-arg source-rect is always interpreted that
-            // way regardless of any CSS size applied to the image, so
-            // converting them server-side would just be wrong unit math
-            // for no benefit -- see inspector_page_stream_agent.cc's
-            // commitImage() for the full reasoning.
-            var srcCachedSrc = tileStore.get(bufUpdate.srcTileId);
-            if (srcCachedSrc) {
-              var srcImg = tileElement(srcCachedSrc);
-              var canvas = document.createElement('canvas');
-              canvas.width = bufUpdate.clip.width;
-              canvas.height = bufUpdate.clip.height;
-              var ctx = canvas.getContext('2d');
-              var tileIdForCache = bufUpdate.tileId;
-              (srcImg.decode ? srcImg.decode() : Promise.resolve()).then(() => {
-                ctx.drawImage(srcImg, bufUpdate.dx, bufUpdate.dy, bufUpdate.rasterWidth, bufUpdate.rasterHeight,
-                              0, 0, bufUpdate.clip.width, bufUpdate.clip.height);
-                // Cache the reconstructed result under this tile's own id
-                // too -- a future BufferUpdate may reference *this* tile
-                // as a srcTileId (server-side, blit sources aren't
-                // limited to full-image tiles; see TileMotionIndex's
-                // Stage() call sites), and it needs to resolve the same
-                // way any other cached tile does.
-                if (tileIdForCache) tileStore.set(tileIdForCache, canvas.toDataURL());
-              }).catch(e => console.warn('PageStream: blit source', bufUpdate.srcTileId, 'failed to decode', e));
-              domImage = canvas;
-              domImage.sharable = true;
-            } else {
-              // Same cache-miss reasoning as the plain tileId branch below.
-              console.warn('PageStream: srcTileId', bufUpdate.srcTileId, 'referenced by blit but not in local tileStore (cache miss)');
-            }
-          } else if (bufUpdate.tileId) {
-            // No `image` -- the server believes we already hold this tile's
-            // bytes under `tileId` (see tileStore's own comment above).
-            var cachedSrc = tileStore.get(bufUpdate.tileId);
-            if (cachedSrc) {
-              domImage = tileElement(cachedSrc);
-              domImage.sharable = true;
-            } else {
-              // A genuine cache miss: the server's residency model and this
-              // client's actual cache have diverged (there's no client-side
-              // eviction yet, so this shouldn't happen in practice -- but if
-              // it does, leave the region showing whatever was previously
-              // drawn there rather than guess at wrong pixels. No resend
-              // round-trip yet; see docs/tile-transport.md §6.
-              console.warn('PageStream: tileId', bufUpdate.tileId, 'referenced but not in local tileStore (cache miss)');
-            }
-          } else if (bufUpdate.color !== undefined) {
-            // Uniform solid-color tile (docs/tile-transport.md §5) -- no
-            // image data at all, just fill the clip rect. `color` arrives
-            // as a signed 32-bit int (protocol `integer`); `>>> 0` undoes
-            // the 0xRRGGBBAA-packed-into-an-int32 reinterpretation
-            // inspector_page_stream_agent.cc's commitImage() applies.
-            var packed = bufUpdate.color >>> 0;
-            var r = (packed >>> 24) & 0xff, g = (packed >>> 16) & 0xff,
-                b = (packed >>> 8) & 0xff, a = packed & 0xff;
-            domImage = document.createElement('div');
-            domImage.className = 'solid-tile';
-            // createDOMLayerImages() below also sets the `width`/`height`
-            // *properties* (meaningful for <img>, a no-op expando on a
-            // <div>) -- set the real CSS size here instead.
-            domImage.style.width = bufUpdate.clip.width + 'px';
-            domImage.style.height = bufUpdate.clip.height + 'px';
-            domImage.style.backgroundColor = 'rgba(' + r + ',' + g + ',' + b + ',' + (a / 255) + ')';
-            domImage.sharable = true;
-          }
-
-          // Real bug, found live: this cull-and-replace used to run
-          // unconditionally, before domImage was even computed. On a cache
-          // miss (the tileId/srcTileId branches above, when nothing was
-          // actually resolved) domImage stays undefined -- but the old code
-          // still culled whatever tile was previously covering this region
-          // AND pushed a new {dom: undefined} entry in its place, directly
-          // contradicting the cache-miss comments' own stated intent
-          // ("leave the region showing whatever was previously drawn
-          // there"). Worse, createDOMLayerImages() below unconditionally
-          // dereferences every entry's `.dom.activeInLayer` -- hitting the
-          // undefined entry threw a TypeError that aborted the *rest* of
-          // that updateScreen() pass partway through, leaving other layers
-          // stuck mid-update. That's what produced the garbled/overlapping
-          // tile rendering seen live (screenshot against the real deployed
-          // instance): a single cache-miss tile anywhere on the page could
-          // corrupt the whole frame. Only cull+replace when there's an
-          // actual replacement image; a cache miss now correctly leaves the
-          // existing tile (and DOM) completely untouched.
-          if (domImage) {
-            // Real bug, found live (ghosting on briskbrowser.com's own "LIVE
-            // SERVER STATS" panel: "92.9" and "93.9" legible on top of each
-            // other, over a grey box that isn't in the page at all).
-            //
-            // Tiles are stacked as separate absolutely-positioned DOM
-            // elements, which composites them source-over. That is only
-            // equivalent to what the compositor does if each tile is opaque
-            // -- and these aren't. A layer that isn't contents_opaque rasters
-            // its translucent background into *every* tile: the stats cards
-            // are `rgba(255,255,255,0.05)`, so every tile covering one is
-            // alpha 13 everywhere except the glyphs. Stacking N of them
-            // therefore lightens the region to 1-0.95^N (the grey box: N was
-            // 12, so ~46% white) and leaves every older tile's opaque glyph
-            // pixels showing through at 95% (the ghost digits).
-            //
-            // The old test only dropped a tile the new one *completely*
-            // covered, which for this page is never:
-            //   - the full-card tile (0,0,176,85) is far bigger than the
-            //     text/bar damage rects that repaint inside it, so it keeps
-            //     its baked-in copy of the digits from page load forever;
-            //   - consecutive damage rects differ (the CPU bar's width walks
-            //     129px..139px as the number moves), so each one only mostly
-            //     covers the last and they pile up one per second.
-            // Static content never shows this only because it is rastered
-            // once and nothing ever overlaps it.
-            //
-            // Culling anything the new tile merely *touches* would be wrong
-            // in the other direction -- it would take the rest of the
-            // full-card tile down with it and punch a real hole in the page.
-            // What's actually correct is to remove exactly the overlap:
-            // subtract the new tile's rect from every tile beneath it, so
-            // each pixel is painted by exactly one tile (the newest to cover
-            // it), which is the compositor's own rule. That's safe because a
-            // BufferUpdate is a complete re-raster of its clip rect, not a
-            // diff -- see the tile region arithmetic at the top of this file.
-            for (let i = l.images.length - 1; i >= 0; i--) {
-              var overlap = rectIntersect(l.images[i].clip, bufUpdate.clip);
-              if (!overlap) continue;
-              // Whole tile gone: drop it. Partly gone: keep it, minus the part
-              // the new tile now owns (punchTileHole reports back if that
-              // leaves nothing).
-              if (rectContains(bufUpdate.clip, l.images[i].clip) ||
-                  punchTileHole(l.images[i], overlap)) {
-                l.images[i].dom.activeInLayer == l && l.images[i].dom.remove();
-                l.images.splice(i, 1);
-              }
-            }
-            l.images.push({clip: bufUpdate.clip, dom: domImage, holes: []});
-          }
-        });
-      }
-
       if (params.targets) {
         l.targets = l.targets || {};
         params.targets.forEach(t => {
@@ -1701,7 +1289,7 @@ export class Session {
       if (this.fullUpdateRequired)
         this.createDOMLayerNode(l);
       else
-        this.createDOMLayerImages(l);
+        this.attachLayerPixels(l);
     });
 
     // remove unowned transform nodes
@@ -1715,12 +1303,9 @@ export class Session {
       if (t && t.dom && t.dom.isConnected && t.scroll) this.applyServerScroll(t);
     });
     this.updateTargetHeights();
-    // frameDone only schedules this paint. Keep previews until the matching
-    // interactive layers have actually been installed in the DOM.
-    if (this.clearPreviewAfterPaint) {
-      this.clearPreviewAfterPaint = false;
-      this.bootstrapPreview = false;
-      this.clearCompactPreview();
+    // frameDone only schedules this paint.
+    if (this.interactivePending) {
+      this.interactivePending = false;
       performance.mark('brisk:interactive-committed');
       requestAnimationFrame(()=>requestAnimationFrame(()=>{
         performance.mark('brisk:interactive-presented');
@@ -1848,10 +1433,7 @@ export class Session {
     }
   }
 
-  clearCompactPreview(){++this.previewGeneration;if(this.compactPreview)this.compactPreview.clear();}
-
   destroy() {
-    this.clearCompactPreview();
     this.ws.destroy();
     this.domElement = null;
   }

@@ -187,7 +187,7 @@ export class StreamDispatcher {
   parseRefs(body) {
     const r = new Reader(body);
     const n = r.varint();
-    if (n > MAX_REFS || r.left !== n * 20) throw new StreamError('bad REF section');
+    if (n > MAX_REFS || r.left !== n * 18) throw new StreamError('bad REF section');
     const refs = [];
     for (let i = 0; i < n; i++)
       refs.push({tx: r.u16(), ty: r.u16(), tw: r.u16(), th: r.u16(), srcSource: r.u16(), srcLayer: r.u32(), stx: r.u16(), sty: r.u16()});
@@ -213,7 +213,8 @@ export class StreamDispatcher {
     const body = r.rest();
     this.stats.text++;
     // Decoded even when the result is thrown away: the text model is stream state.
-    const decode = body.length ? this.decoder('text').decode(body) : [];
+    // An empty band (no text) still queues behind unfinished decodes, so applying keeps arrival order.
+    const decode = body.length ? this.decoder('text').decode(body) : (this.textPending.size ? Promise.all([...this.textPending]).then(() => []) : []);
     const apply = runs => {
       const state = this.layerState(source, layer);
       if (!state || generation < state.generation) return;

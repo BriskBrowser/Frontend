@@ -195,7 +195,7 @@ export class Compositor {
         view.pixelRoot.appendChild(canvas);
         this.placeStrip(view, index, canvas);
       }
-      strip.ctx.putImageData(view.image, 0, -index * STRIP_H, x0, top, x1 - x0, bottom - top);
+      strip.ctx.putImageData(view.image, 0, index ? -index * STRIP_H : 0, x0, top, x1 - x0, bottom - top);
       this.stats.putPixels += (x1 - x0) * (bottom - top);
     }
   }

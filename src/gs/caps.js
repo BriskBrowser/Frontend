@@ -19,7 +19,7 @@ async function probeWebGpu(env) {
   if (!gpu?.requestAdapter) return {webgpu: false, maxTexture: 0};
   try {
     // A browser that never answers must not hold up PageStream.enable.
-    const adapter = await Promise.race([gpu.requestAdapter(), new Promise(resolve => setTimeout(() => resolve(null), 1000))]);
+    const adapter = await Promise.race([gpu.requestAdapter(), new Promise(resolve => setTimeout(() => resolve(null), 300))]);
     if (!adapter) return {webgpu: false, maxTexture: 0};
     return {webgpu: true, maxTexture: adapter.limits?.maxTextureDimension2D || 8192};
   } catch (_) { return {webgpu: false, maxTexture: 0}; }

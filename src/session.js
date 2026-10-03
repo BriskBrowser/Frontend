@@ -494,11 +494,6 @@ export class Session {
         t.sessionId && quad && this.onSessionSetHeight(t.sessionId, quad[1])
       })
     });
-
-    if (this.gsCompositor()?.hasPixels(this.sourceId)) {
-      const warmPreview = document.getElementById('warm-preview');
-      if (warmPreview) warmPreview.remove();
-    }
   }
 
   scrollState(t) {

@@ -29,7 +29,7 @@
     "test": "test"
   },
   "scripts": {
-    "test": "mocha",
+    "test": "node --test test/gs/*.test.mjs && node test/module_graph.mjs && node test/gs/browser_compositor.cjs && node test/layer_stacking.cjs && node test/sticky_axes.cjs",
     "build": "webpack"
   },
   "repository": {

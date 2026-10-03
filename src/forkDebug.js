@@ -172,6 +172,8 @@ export function renderMini(session, mount, viewport) {
   renderer.targetStatuses = new Map();
   renderer.updateTargetHeights = () => {};
   // The live compositor owns the layer canvases; a miniature draws copies.
+  renderer.sourceId = session.sourceId;
+  renderer.gsCompositor = () => session.gsCompositor();
   renderer.attachLayerPixels = l => {
     const view = l.dom && session.gsCompositor()?.layer(session.sourceId, Number(l.layerId));
     if (view && !l.dom.querySelector('canvas')) l.dom.append(copyPixels(view.root));

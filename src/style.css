@@ -92,16 +92,6 @@ bb-session.fullscreen:not(.active){
     height: 100vh;
 }
 
-#warm-preview {
-    position: fixed;
-    inset: 0;
-    width: 100vw;
-    height: 100vh;
-    object-fit: cover;
-    object-position: top left;
-    z-index: 0;
-}
-
 /* Desktop interaction code is loaded separately; native scrolling stays local. */
 @media (any-pointer: fine) {
   .link-hit-region { cursor: var(--brisk-cursor, pointer); }

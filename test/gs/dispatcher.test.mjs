@@ -210,7 +210,6 @@ test('malformed packets throw StreamError and leave state alone', () => {
     P.pixels({sections: [[99, Uint8Array.of(1)]]}),                      // unknown codec
     P.pixels({sections: [[16, Uint8Array.of(5, 1)]]}),                   // REF with wrong length
     Uint8Array.from([...good, 0]),                                       // trailing byte
-    new Uint8Array([0xB7, 3, 1, 0, 77]),                                 // unknown control
     new Uint8Array([0xB7, 3, 1, 0, 2, 1, 0, 0, 0]),                      // truncated LAYER
     P.layerCtl({w: 100000, h: 4}),
     P.layerCtl({scale: 0}),
@@ -218,6 +217,7 @@ test('malformed packets throw StreamError and leave state alone', () => {
     Uint8Array.from([0xB7, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 16, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0x0f]), // bad varint
   ];
   for (const [i, b] of bad.entries()) assert.throws(() => t.d.handle(b), StreamError, 'case ' + i);
+  t.d.handle(new Uint8Array([0xB7, 3, 1, 0, 77]));  // an unknown control subtype is ignored, not an error
   assert.deepEqual(t.d.surface(1, 1).rgba, before);
   assert.equal(t.flat.calls.length, calls);
   assert.equal(t.events.length, evs);

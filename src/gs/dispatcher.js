@@ -287,7 +287,7 @@ export class StreamDispatcher {
         this.removeSource(source);
         return undefined;
       }
-      default: throw new StreamError('unknown control subtype ' + sub);
+      default: return undefined;  // newer control subtypes (e.g. SURFACE_DIGEST, which the proxy consumes) are ignored
     }
   }
 

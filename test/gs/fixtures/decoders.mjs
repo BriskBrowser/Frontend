@@ -4,7 +4,7 @@ export class StubFlat {
   constructor() { this.calls = []; this.resets = 0; this.library = 0; }
   apply(surface, surfaces, rect, bytes) {
     if (bytes.length < 5) throw new Error('flat: truncated');
-    this.calls.push({rect: {...rect}, bytes: Array.from(bytes), surfaces});
+    this.calls.push({rect: {...rect}, bytes: Array.from(bytes), surfaces, surface});
     this.library++;
     for (let y = rect.y; y < rect.y + rect.h; y++)
       for (let x = rect.x; x < rect.x + rect.w; x++) surface.rgba.set(bytes.subarray(0, 4), (y * surface.w + x) * 4);

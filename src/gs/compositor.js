@@ -142,10 +142,13 @@ export class Compositor {
     return true;
   }
 
-  // Strips live at the surface's css offset inside the layer.
+  // Strips live at the layer element's origin.
   place(view) {
-    const {cssScale, cssX, cssY, w, h} = view.info;
-    view.pixelRoot.style.cssText = 'position:absolute;left:' + cssX + 'px;top:' + cssY + 'px;width:' + (w / cssScale) + 'px;height:' + (h / cssScale) + 'px';
+    // The layer's own element is already placed at the layer origin (session.js: offsetToTransformParent, the same
+    // origin the service reports as css_x/css_y), so surface and text are laid out at 0,0 inside it. Adding css_x/css_y
+    // here shifted every pixel canvas of an offset layer by its origin twice (BBC cookie banner, carousels).
+    const {cssScale, w, h} = view.info;
+    view.pixelRoot.style.cssText = 'position:absolute;left:0px;top:0px;width:' + (w / cssScale) + 'px;height:' + (h / cssScale) + 'px';
     for (const [index, strip] of view.strips) this.placeStrip(view, index, strip.canvas);
   }
   placeStrip(view, index, canvas) {
@@ -202,9 +205,9 @@ export class Compositor {
 
   paintText(view) {
     if (!view.info) return;
-    const {cssScale, cssX, cssY, w, h} = view.info;
-    const widthDev = Math.ceil((cssX + w / cssScale) * cssScale);
-    const layerCssH = cssY + h / cssScale;
+    const {cssScale, w, h} = view.info;
+    const widthDev = w;
+    const layerCssH = h / cssScale;
     for (const [band, entry] of view.bands) {
       if (!entry.stale) continue;
       const topCss = band * BAND_CSS;
@@ -224,8 +227,9 @@ export class Compositor {
       const ctx = entry.ctx;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, wDev, hDev);
-      ctx.translate(0, -topCss * cssScale);
-      this.drawRuns(ctx, entry.runs, cssScale, 0, 0);
+      // drawRuns() sets an absolute transform per glyph (a prior translate() would be discarded), so the band's
+      // offset goes in as oy: runs are in layer css px, this canvas starts at topCss.
+      this.drawRuns(ctx, entry.runs, cssScale, 0, -topCss * cssScale);
       entry.stale = false;
       this.stats.textDraws++;
     }

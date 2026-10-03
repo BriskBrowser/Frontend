@@ -123,6 +123,9 @@ test('text bands draw with drawRuns above the pixels; empty runs remove the band
   t.e.runFrames();
   assert.deepEqual(draws.map(d => d.runs[0].id), ['a', 'b']);
   assert.equal(draws[0].scale, 2);
+  // drawRuns sets absolute per-glyph transforms, so a band's offset must arrive as oy (regression: band >= 1 drew off-canvas).
+  assert.ok(draws[0].oy === 0);
+  assert.equal(draws[1].oy, -BAND_CSS * 2);
   const view = t.c.layer(1, 2);
   const canvas1 = view.bands.get(1).canvas;
   assert.equal(canvas1.height, Math.ceil((1500 - BAND_CSS) * 2));
@@ -155,5 +158,5 @@ test('LAYER geometry change restyles strips and redraws text', () => {
   t.c.layerChanged(1, 2, {generation: 3, w: 64, h: 64, cssScale: 2, cssX: 5, cssY: 6}, t.surface);
   t.e.runFrames();
   assert.equal(draws.length, 2);
-  assert.ok(t.c.layer(1, 2).pixelRoot.style.cssText.includes('left:5px;top:6px'));
+  assert.ok(t.c.layer(1, 2).pixelRoot.style.cssText.includes('left:0px;top:0px'), 'layer origin is the layer element\'s job, not the compositor\'s');
 });

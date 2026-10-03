@@ -62,6 +62,9 @@ test('generation: older patch is ignored but still runs the decoders', () => {
   assert.deepEqual(pixelAt(t.d.surface(1, 1), 3, 3), [10, 10, 10, 255]);
   assert.equal(t.flat.calls.length, 2, 'library-bearing sections are never skipped');
   assert.equal(t.d.stats.ignored, 1);
+  // The coder codes against the surface's tile maps, so a stale patch is decoded on the real surface (pixels restored
+  // afterwards), not a scratch one: regression for "lane did not end cleanly" on a slow link.
+  assert.equal(t.flat.calls[1].surface, t.d.surface(1, 1));
   t.d.handle(P.pixels({generation: 6, sections: [px(t.d, 20, 20, 20)]}));
   assert.deepEqual(pixelAt(t.d.surface(1, 1), 3, 3), [20, 20, 20, 255]);
 });

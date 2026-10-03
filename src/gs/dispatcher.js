@@ -138,14 +138,28 @@ export class StreamDispatcher {
       if (x < 0 || y < 0 || x + w > s.w || y + h > s.h) throw new StreamError('patch outside layer');
       ignore = this.allTilesNewer(s, x, y, w, h, generation);
     }
-    // A stale or orphaned patch still runs through the decoders, on a scratch
-    // surface: library tiles and photo ids are stream-global and append-only,
-    // so skipping a section would desynchronise every later one.
+    // A stale patch still runs through the decoders, against the real surface: the flat coder codes each tile against
+    // the surface's tile maps (and the encoder has already committed this patch to its mirror of them), library tiles
+    // and photo ids are stream-global and append-only, so decoding it on a scratch surface (all maps zero) or skipping
+    // it desynchronises every later section ("lane did not end cleanly" under a slow link, where older work
+    // overtakes newer). Its pixels are then put back, since newer ones are already shown. Only a patch for a layer we
+    // do not hold, or outside it, goes to a scratch surface.
     if (ignore) this.stats.ignored++;
-    const surface = ignore ? new Surface(w, h) : state.surface;
-    const rect = ignore ? {x: 0, y: 0, w, h} : {x, y, w, h};
+    const real = state && state.surface;
+    const inReal = !!real && x >= 0 && y >= 0 && x + w <= real.w && y + h <= real.h;
+    const surface = inReal ? real : ignore ? new Surface(w, h) : state.surface;
+    const rect = inReal || !ignore ? {x, y, w, h} : {x: 0, y: 0, w, h};
+    let saved = null;
+    if (ignore && inReal) {
+      saved = new Uint8ClampedArray(w * h * 4);
+      for (let row = 0; row < h; row++) saved.set(real.rgba.subarray(((y + row) * real.w + x) * 4, ((y + row) * real.w + x + w) * 4), row * w * 4);
+    }
     if (flags & FLAG_RESET_RECT) surface.clearRect(rect.x, rect.y, rect.w, rect.h);
     const done = () => {
+      if (saved) {
+        for (let row = 0; row < h; row++) real.rgba.set(saved.subarray(row * w * 4, (row + 1) * w * 4), ((y + row) * real.w + x) * 4);
+        return;
+      }
       if (ignore) return;
       this.markGeneration(surface, rect, generation);
       this.sink.dirty?.(source, layer, rect);

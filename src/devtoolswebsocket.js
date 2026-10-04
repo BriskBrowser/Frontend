@@ -51,7 +51,6 @@ export class devToolsWebsocket extends WebSocket {
       this.streamClosed = true;
       for (const callback of this.callbacks) if (callback) callback.reject(new Error('Browser connection closed'));
       this.callbacks = [];
-      this._gs?.close();
       this.metadataEncoder = null;
       this.metadataDecoder = null;
       this.receiveQueue.length = 0;

@@ -105,7 +105,7 @@ export class Session {
       // Readiness is control metadata, not a renderer frame boundary. Updating
       // it must never commit an unrelated structural frame halfway through.
       for(const status of layerUpdate.targets||[]){
-        if(status.sessionId)this.onNewSession(status.sessionId,this);
+        if(status.sessionId)this.onNewSession(status.sessionId,this,status.sourceId);
         this.targetStatuses.set(layerUpdate.layerId+':'+status.backendNodeId,status);
         if(this.targetStatuses.size>2048)this.targetStatuses.delete(this.targetStatuses.keys().next().value);
         const layer=this.sessionState.layer_tree[layerUpdate.layerId];
@@ -119,7 +119,7 @@ export class Session {
       this.sessionState.nextLayerUpdates.push(msg.layerUpdate);
       // Create any sessions for event target clicks, because they could start sending data right away.
       msg.layerUpdate.targets && msg.layerUpdate.targets.forEach(x=> {
-        x.sessionId && this.onNewSession(x.sessionId, this)
+        x.sessionId && this.onNewSession(x.sessionId, this, x.sourceId)
       });
     };
 
@@ -730,7 +730,11 @@ export class Session {
     // is at that point instead. A click is never dropped.
     const point = Number.isFinite(evt.clientX) && Number.isFinite(evt.clientY) ?
         {x: evt.clientX, y: evt.clientY} : {};
-    this.ws.req('PageStream.clickNode', { backendNodeId: region.metadata.backendNodeId, ...point } );
+    // The promotion above needed no server. Telling the server is best effort: a closed connection
+    // rejects, and the promoted page stays on screen.
+    try {
+      this.ws.req('PageStream.clickNode', { backendNodeId: region.metadata.backendNodeId, ...point } ).catch(() => {});
+    } catch (_) {}
     evt.preventDefault();
   }
 

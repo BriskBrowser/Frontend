@@ -26,6 +26,15 @@ export class Browser {
 
     var socket = this.socket = await wsPromise;
 
+    // A click on a green link promotes its fork without the server, so the mouse handler it goes
+    // through must already be loaded if the connection is lost before the first hover.
+    const preloadDesktopInput = event => {
+      if (event.pointerType !== 'mouse') return;
+      window.removeEventListener('pointermove', preloadDesktopInput, true);
+      import('./desktopInput.js').catch(() => {});
+    };
+    window.addEventListener('pointermove', preloadDesktopInput, {passive: true, capture: true});
+
     // The renderer/debug panel stays out of the startup bundle and network.
     window.addEventListener('keydown', async event => {
       if (!event.altKey || !event.shiftKey || event.code !== 'KeyD' || event.repeat) return;

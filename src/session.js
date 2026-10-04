@@ -177,6 +177,22 @@ export class Session {
       }
     };
 
+    // alert/confirm/prompt block the page until answered. Ask the reader with the browser's own dialogs
+    // (the page is frozen meanwhile, as it is in any browser) and report the answer.
+    this.ws.eventListeners['Page.javascriptDialogOpening'] = params => {
+      let accept = true, promptText;
+      try {
+        const text = String(params.message ?? '');
+        if (params.type === 'confirm') accept = confirm(text);
+        else if (params.type === 'prompt') {
+          const answer = prompt(text, params.defaultPrompt ?? '');
+          accept = answer !== null;
+          promptText = answer ?? '';
+        } else if (params.type !== 'beforeunload') alert(text);
+      } catch (e) { accept = params.type !== 'confirm'; }
+      this.ws.req('Page.handleJavaScriptDialog', {accept, promptText}).catch(() => {});
+    };
+
     this.ws.eventListeners['PageStream.keyboardStateChange'] = params => {
       this.sessionState.keyboard = params;
 

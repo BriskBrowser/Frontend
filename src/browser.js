@@ -114,6 +114,18 @@ export class Browser {
       if (params && typeof params.title === 'string' && params.title) document.title = params.title;
     };
 
+    // A file the page downloaded: fetch it from the server, as a browser's own download.
+    socket.eventListeners['PageStream.download'] = params => {
+      if (!params || !/^[0-9a-f]{32}$/.test(params.token)) return;
+      const link = document.createElement('a');
+      link.href = '/brisk-download/' + params.token;
+      link.download = typeof params.filename === 'string' ? params.filename : '';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    };
+
     socket.eventListeners['PageStream.timing']=params=>performance.mark('brisk:server:'+params.stage,{detail:{elapsed:params.elapsed}});
 
     socket.eventListeners['Target.targetCreated'] = msg => {

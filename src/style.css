@@ -62,6 +62,17 @@ bb-session.fullscreen:not(.active){
   transition: outline-color 0.15s, box-shadow 0.15s;
 }
 
+/* A fork has started loading this link's destination but is not ready. Same shape as .preloaded,
+   much fainter, so a reader can tell "ready" from "on its way". */
+.loading {
+  z-index: 9999;
+  outline: 1px solid rgba(46, 204, 113, 0.3);
+  outline-offset: -1px;
+  border-radius: 3px;
+  box-shadow: 0 0 4px 0 rgba(46, 204, 113, 0.15);
+  transition: outline-color 0.15s, box-shadow 0.15s;
+}
+
 .link-hit-region {
   position: absolute;
   pointer-events: auto;

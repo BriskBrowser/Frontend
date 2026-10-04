@@ -769,6 +769,9 @@ export class Session {
       region.classList.toggle('alive', !!t.sessionId);
     }
     region.classList.toggle('preloaded', !!(t.sessionId && t.ready));
+    // A fork exists but has not finished loading: a faint green. A tap still promotes it (the server
+    // swaps to the fork that has already started the click), it just is not instant yet.
+    region.classList.toggle('loading', !!(t.sessionId && !t.ready));
   }
 
   createTargetNode(t, l) {

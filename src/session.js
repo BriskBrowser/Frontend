@@ -689,6 +689,51 @@ export class Session {
     });
   }
 
+  // A completed click on a hit region, by finger or by mouse: promote its fork when that is ready,
+  // and tell the server which node was clicked. |evt| is the pointer event that ended the click.
+  tapTarget(region, evt) {
+    // Real bug, found live: this used to fire on sessionId alone --
+    // SocketHandler.js sets that the instant a speculative fork exists,
+    // well before its own pre-navigation (PageStream.clickNode) has
+    // actually finished (measured live: 6+ seconds for a real
+    // destination page). Activating instantly on a fork that hasn't
+    // gone anywhere yet swapped the client straight to stale/blank
+    // content instead of the promised instant page. `ready` is a
+    // separate flag SocketHandler.js now sends only once that
+    // navigation genuinely succeeds -- see its own comment.
+    if (region.metadata.sessionId && region.metadata.ready) {
+      // Means we have preloaded this click - we just need to transfer to that session.
+      // The destination recorded on the clickable target is only a
+      // prediction/readiness label and may be an intermediate redirect.
+      // Every fork's Session independently tracks authoritative Chromium
+      // Page.frameNavigated/navigatedWithinDocument events. Promote that
+      // session as-is; sessionActivate publishes its currentURL, and any
+      // later canonicalisation continues to update the active address bar.
+      performance.mark('brisk:promotion-start');
+      const interactive=!!region.metadata.inputReady;
+      this.onSessionActivate(region.metadata.sessionId);
+      requestAnimationFrame(()=>requestAnimationFrame(()=>performance.mark('brisk:promotion-presented',{detail:{interactive}})));
+    }
+    // A PointerEvent carries the lifted pointer's position directly on the
+    // event -- the actual tap point, useful for replaying this exact click
+    // by coordinate later (see test/replayTrace.js). (This used to dig it
+    // out of TouchEvent.changedTouches, which does not exist on a
+    // PointerEvent and would have recorded undefined for every click.)
+    interactionTrace.record('click', {
+      x: Number.isFinite(evt.clientX) ? Math.round(evt.clientX) : undefined,
+      y: Number.isFinite(evt.clientY) ? Math.round(evt.clientY) : undefined,
+      backendNodeId: region.metadata.backendNodeId,
+      linkText: region.dataset.linkText || undefined,
+    });
+    // The tap point travels with the node: if the node is gone by the time
+    // the click arrives (navigation, re-render), the server clicks whatever
+    // is at that point instead. A click is never dropped.
+    const point = Number.isFinite(evt.clientX) && Number.isFinite(evt.clientY) ?
+        {x: evt.clientX, y: evt.clientY} : {};
+    this.ws.req('PageStream.clickNode', { backendNodeId: region.metadata.backendNodeId, ...point } );
+    evt.preventDefault();
+  }
+
   targetTouch(type, evt) {
     if (evt.pointerType === 'mouse') return;
     // We want to detect 'click' events, but have to use touch instead because
@@ -704,46 +749,7 @@ export class Session {
       // possibly on a different page after navigation. Cancel it first.
       this.touch('touchCancel', {touches: []});
       this.suppressTouchEnd = true;
-      // Real bug, found live: this used to fire on sessionId alone --
-      // SocketHandler.js sets that the instant a speculative fork exists,
-      // well before its own pre-navigation (PageStream.clickNode) has
-      // actually finished (measured live: 6+ seconds for a real
-      // destination page). Activating instantly on a fork that hasn't
-      // gone anywhere yet swapped the client straight to stale/blank
-      // content instead of the promised instant page. `ready` is a
-      // separate flag SocketHandler.js now sends only once that
-      // navigation genuinely succeeds -- see its own comment.
-      if (evt.currentTarget.metadata.sessionId && evt.currentTarget.metadata.ready) {
-        // Means we have preloaded this click - we just need to transfer to that session.
-        // The destination recorded on the clickable target is only a
-        // prediction/readiness label and may be an intermediate redirect.
-        // Every fork's Session independently tracks authoritative Chromium
-        // Page.frameNavigated/navigatedWithinDocument events. Promote that
-        // session as-is; sessionActivate publishes its currentURL, and any
-        // later canonicalisation continues to update the active address bar.
-        performance.mark('brisk:promotion-start');
-        const interactive=!!evt.currentTarget.metadata.inputReady;
-        this.onSessionActivate(evt.currentTarget.metadata.sessionId);
-        requestAnimationFrame(()=>requestAnimationFrame(()=>performance.mark('brisk:promotion-presented',{detail:{interactive}})));
-      }
-      // A PointerEvent carries the lifted pointer's position directly on the
-      // event -- the actual tap point, useful for replaying this exact click
-      // by coordinate later (see test/replayTrace.js). (This used to dig it
-      // out of TouchEvent.changedTouches, which does not exist on a
-      // PointerEvent and would have recorded undefined for every click.)
-      interactionTrace.record('click', {
-        x: Number.isFinite(evt.clientX) ? Math.round(evt.clientX) : undefined,
-        y: Number.isFinite(evt.clientY) ? Math.round(evt.clientY) : undefined,
-        backendNodeId: evt.currentTarget.metadata.backendNodeId,
-        linkText: evt.currentTarget.dataset.linkText || undefined,
-      });
-      // The tap point travels with the node: if the node is gone by the time
-      // the click arrives (navigation, re-render), the server clicks whatever
-      // is at that point instead. A click is never dropped.
-      const point = Number.isFinite(evt.clientX) && Number.isFinite(evt.clientY) ?
-          {x: evt.clientX, y: evt.clientY} : {};
-      this.ws.req('PageStream.clickNode', { backendNodeId: evt.currentTarget.metadata.backendNodeId, ...point } );
-      evt.preventDefault();
+      this.tapTarget(evt.currentTarget, evt);
     } else {
       delete evt.currentTarget.metadata.touchStarted;
       evt.currentTarget.releasePointerCapture(evt.pointerId) 

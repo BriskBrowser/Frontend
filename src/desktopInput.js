@@ -68,8 +68,10 @@ export class DesktopInput {
     this.point = {x:e.clientX - rect.left, y:e.clientY - rect.top};
     const params = {...this.point, modifiers:modifiers(e), buttons:e.buttons,
       button: buttons[e.button] || 'none'};
+    if (this.held && type === 'pointermove' &&
+        Math.hypot(params.x - this.held.x, params.y - this.held.y) > 4) this.flushHeld();
     if (type === 'pointermove') {
-      this.move = {...params, button:this.pressed || 'none', type:'mouseMoved'};
+      this.move ={...params, button:this.pressed || 'none', type:'mouseMoved'};
       if (!this.frame) this.frame = requestAnimationFrame(() => {this.frame = null; this.flushMove();});
       return;
     }
@@ -85,14 +87,39 @@ export class DesktopInput {
         Math.hypot(params.x-this.lastClick.x, params.y-this.lastClick.y) < 5 &&
         this.lastClick.button === params.button ? this.clickCount % 3 + 1 : 1;
       this.lastClick = {...params, time:now};
-      this.send('Input.dispatchMouseEvent', {...params,type:'mousePressed',clickCount:this.clickCount});
+      const press = {...params,type:'mousePressed',clickCount:this.clickCount};
+      // A plain click on a link that has a fork is a tap: the press waits, so that the release can
+      // promote the fork (Session.tapTarget) instead of replaying the click on the page being left.
+      const region = e.button === 0 && !params.modifiers && this.forkRegion(e);
+      if (region) this.held = {press, x:params.x, y:params.y, region:region.dataset.backendNodeId};
+      else this.send('Input.dispatchMouseEvent', press);
     } else {
       this.pressed = null;
       if (this.root.hasPointerCapture(e.pointerId)) this.root.releasePointerCapture(e.pointerId);
+      if (this.held) {
+        const down = this.held.region, up = this.forkRegion(e);
+        if (type === 'pointerup' && up && up.dataset.backendNodeId === down) {
+          this.held = null;
+          this.session.tapTarget(up, e);
+          return;
+        }
+        this.flushHeld();
+      }
       this.selectionPending = this.send('Input.dispatchMouseEvent', {
         ...params,type:'mouseReleased',clickCount:this.clickCount || 1,
       }).then(() => this.refresh(true));
     }
+  }
+  // The hit region of a link with a fork (green or still loading) under the pointer, if any.
+  forkRegion(e) {
+    const region = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('[data-backend-node-id]');
+    return region?.metadata?.sessionId && this.root.contains(region) ? region : null;
+  }
+  // The press held back for a possible tap turns out to be an ordinary mouse press.
+  flushHeld() {
+    if (!this.held) return;
+    const {press} = this.held; this.held = null;
+    this.send('Input.dispatchMouseEvent', press);
   }
   async refresh(selection) {
     if (this.closed) return;
@@ -165,6 +192,7 @@ export class DesktopInput {
   reset() {this.generation = (this.generation || 0) + 1; this.text = ''; this.selectionPending = null;}
   release() {
     this.flushMove(); this.frame = null;
+    this.flushHeld();
     if (this.pressed) this.send('Input.dispatchMouseEvent', {
       ...this.point,type:'mouseReleased',button:this.pressed,buttons:0,clickCount:1,
     });

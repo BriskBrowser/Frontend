@@ -909,6 +909,7 @@ export class Session {
   // neither path can drift from what toCss() actually needs.
   applyTransformCss(t) {
     t.dom.style.transform = this.toCss(t.local, t.origin, t.post_translation, this.stickyOffsetPx(t));
+    this.gsCompositor()?.scheduleRetune?.();
     // Layers are ordered by one global draw order (`layer.zIndex`), but they
     // live in per-transform-node elements. An element with a `z-index` is a
     // stacking context, which flattens everything inside it into a single slot

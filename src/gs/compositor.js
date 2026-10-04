@@ -23,6 +23,8 @@ export function domEnv(doc = globalThis.document) {
     requestFrame: cb => globalThis.requestAnimationFrame(cb),
     imageData: (rgba, w, h) => new ImageData(rgba, w, h),
     isConnected: el => el.isConnected,
+    // On-screen width of an element in device px (every ancestor transform and any pinch zoom included).
+    shownWidth: el => el.getBoundingClientRect().width * (globalThis.devicePixelRatio || 1) * (globalThis.visualViewport?.scale || 1),
   };
 }
 
@@ -203,17 +205,51 @@ export class Compositor {
     }
   }
 
+  // Device px per layer CSS px at which text should be drawn: the scale it is shown at. Vector text drawn at the
+  // layer's raster scale and then shrunk by the page's transform (a page without a viewport meta is shown at
+  // ~0.4) was minified by the browser, skipping pixels: small text came out black-and-white and broken.
+  textScale(view) {
+    const {cssScale, w} = view.info;
+    const layerCssW = w / cssScale;
+    const shown = this.env.shownWidth && layerCssW > 0 ? this.env.shownWidth(view.pixelRoot) / layerCssW : 0;
+    if (!(shown > 0)) return cssScale;
+    return Math.min(Math.max(shown, cssScale * 0.25), cssScale * 4);
+  }
+
+  // Coalesced: transforms are applied on every scroll step.
+  scheduleRetune() {
+    if (this.retuning) return;
+    this.retuning = true;
+    this.env.requestFrame(() => { this.retuning = false; this.retuneText(); });
+  }
+
+  // The page's transform changed (zoom, a new page scale): redraw text whose shown scale no longer matches.
+  retuneText() {
+    for (const view of this.layers.values()) {
+      if (!view.info || !view.bands.size || !this.connected(view)) continue;
+      const scale = this.textScale(view);
+      if (view.textScaleUsed && Math.abs(scale / view.textScaleUsed - 1) < 0.1) continue;
+      for (const entry of view.bands.values()) entry.stale = true;
+      view.textStale = true;
+      this.schedule();
+    }
+  }
+
   paintText(view) {
     if (!view.info) return;
     const {cssScale, w, h} = view.info;
-    const widthDev = w;
+    const layerCssW = w / cssScale;
     const layerCssH = h / cssScale;
+    let scale = this.textScale(view);
+    // Keep a band's canvas within what a browser allocates.
+    while (scale > cssScale * 0.25 && (layerCssW * scale > 16384 || layerCssW * scale * BAND_CSS * scale > 3.2e7)) scale *= 0.8;
+    view.textScaleUsed = scale;
     for (const [band, entry] of view.bands) {
       if (!entry.stale) continue;
       const topCss = band * BAND_CSS;
       const heightCss = Math.min(BAND_CSS, layerCssH - topCss);
       if (heightCss <= 0 || !this.drawRuns) continue;   // below the layer, or text.js not loaded yet
-      const wDev = Math.min(widthDev, 16384), hDev = Math.ceil(heightCss * cssScale);
+      const wDev = Math.min(Math.ceil(layerCssW * scale), 16384), hDev = Math.ceil(heightCss * scale);
       if (!entry.canvas) {
         entry.canvas = this.env.createElement('canvas');
         view.textRoot.appendChild(entry.canvas);
@@ -223,13 +259,13 @@ export class Compositor {
       // Resizing clears; only do it when the geometry changed.
       if (canvas.width !== wDev) canvas.width = wDev;
       if (canvas.height !== hDev) canvas.height = hDev;
-      canvas.style.cssText = 'position:absolute;left:0;top:' + topCss + 'px;width:' + (wDev / cssScale) + 'px;height:' + (hDev / cssScale) + 'px';
+      canvas.style.cssText = 'position:absolute;left:0;top:' + topCss + 'px;width:' + layerCssW + 'px;height:' + (hDev / scale) + 'px';
       const ctx = entry.ctx;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, wDev, hDev);
       // drawRuns() sets an absolute transform per glyph (a prior translate() would be discarded), so the band's
       // offset goes in as oy: runs are in layer css px, this canvas starts at topCss.
-      this.drawRuns(ctx, entry.runs, cssScale, 0, -topCss * cssScale);
+      this.drawRuns(ctx, entry.runs, scale, 0, -topCss * scale);
       entry.stale = false;
       this.stats.textDraws++;
     }

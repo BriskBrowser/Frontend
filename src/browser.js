@@ -109,6 +109,11 @@ export class Browser {
     socket.eventListeners['PageStream.mediaAvailable'] = params => {
       if (String(params.sessionId) === String(this.activeSession)) this.activateMedia(this.activeSession);
     };
+    // The page's real title, read by the server (Chromium only reports it for pages it discovered itself).
+    socket.eventListeners['PageStream.titleChanged'] = params => {
+      if (params && typeof params.title === 'string' && params.title) document.title = params.title;
+    };
+
     socket.eventListeners['PageStream.timing']=params=>performance.mark('brisk:server:'+params.stage,{detail:{elapsed:params.elapsed}});
 
     socket.eventListeners['Target.targetCreated'] = msg => {

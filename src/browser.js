@@ -64,6 +64,14 @@ export class Browser {
     socket.eventListeners['PageStream.sessionAvailable'] = params => {
       this.addSession(params.sessionId, null, params.sourceId);
     };
+    // A page shown from the cache turned out not to match the origin. When the reader was meanwhile tapping on
+    // through it, say which link no longer exists and where they were put back.
+    socket.eventListeners['PageStream.optimisticState'] = params => {
+      if (params.state !== 'corrected' || params.reason !== 'speculative-link-missing') return;
+      const name = params.missingText ? '“' + params.missingText + '”' : params.missingURL;
+      this.showNotice('The link ' + name + ' is no longer on this page, so it was not opened. The page changed while it was loading.',
+        params.missingURL);
+    };
     socket.eventListeners['PageStream.activateSession'] = params => {
       this.addSession(params.sessionId, null, params.sourceId);
       if (String(this.activeSession) !== String(params.sessionId))
@@ -217,6 +225,33 @@ export class Browser {
       document.body.append(panel);
     }
     panel.firstChild.textContent = message;
+  }
+
+  // A dismissible note at the bottom of the screen; it goes by itself after a while. `detail` is shown small.
+  showNotice(message, detail) {
+    document.getElementById('brisk-notice')?.remove();
+    const panel = document.createElement('div');
+    panel.id = 'brisk-notice';
+    panel.setAttribute('role', 'status');
+    Object.assign(panel.style, {position:'fixed', bottom:'12px', left:'12px', right:'12px', zIndex:'2147483646',
+      padding:'12px 16px', background:'#222', color:'#fff', font:'15px sans-serif', borderRadius:'8px',
+      boxShadow:'0 2px 12px rgba(0,0,0,.4)'});
+    const text = document.createElement('div');
+    text.textContent = message;
+    panel.append(text);
+    if (detail) {
+      const small = document.createElement('div');
+      small.textContent = detail;
+      Object.assign(small.style, {font:'12px sans-serif', opacity:'.7', marginTop:'4px', wordBreak:'break-all'});
+      panel.append(small);
+    }
+    const close = document.createElement('button');
+    close.textContent = 'Dismiss';
+    close.style.marginTop = '8px';
+    close.onclick = () => panel.remove();
+    panel.append(close);
+    document.body.append(panel);
+    setTimeout(() => panel.remove(), 20000);
   }
 
   currentURL() {

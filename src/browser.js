@@ -126,6 +126,39 @@ export class Browser {
       link.remove();
     };
 
+    // The page opened a file input: show the browser's own chooser and upload the choice, for the server to hand to
+    // the page. Choosing nothing (or too much) answers with no files, so the page is not left waiting.
+    socket.eventListeners['PageStream.fileChooser'] = params => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = !!(params && params.multiple);
+      input.style.display = 'none';
+      let answered = false;
+      const answer = async files => {
+        if (answered) return;
+        answered = true;
+        input.remove();
+        try { await socket.req(undefined, 'PageStream.setFiles', {files}); } catch (error) { /* page keeps its old value */ }
+      };
+      input.addEventListener('change', async () => {
+        const chosen = [...input.files];
+        if (chosen.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) {
+          this.showError('Those files are too large to upload (40 MB limit).');
+          return answer([]);
+        }
+        const files = await Promise.all(chosen.map(file => new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve({name: file.name, data: String(reader.result).split(',')[1] || ''});
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(file);
+        })));
+        answer(files.filter(Boolean));
+      });
+      input.addEventListener('cancel', () => answer([]));
+      document.body.appendChild(input);
+      input.click();
+    };
+
     socket.eventListeners['PageStream.timing']=params=>performance.mark('brisk:server:'+params.stage,{detail:{elapsed:params.elapsed}});
 
     socket.eventListeners['Target.targetCreated'] = msg => {
